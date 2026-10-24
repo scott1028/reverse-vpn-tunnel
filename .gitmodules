@@ -1,0 +1,3 @@
+[submodule "references/netbird"]
+	path = references/netbird
+	url = git@github.com:netbirdio/netbird.git

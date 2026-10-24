@@ -1,0 +1,64 @@
+# Home1 (public IP) <-> isp router <-> nat2 (Home2 router) <-> Home2 LAN.
+# All networks are internal; each node sets its own default route (node.sh).
+# macvlan: an internal macvlan network gets its own dummy parent, so traffic
+# between nodes skips the host bridge and its netfilter rules, which drop
+# routed (cross-subnet) frames on internal bridge networks.
+x-node: &node
+  image: rvt-e2e:latest
+  privileged: true # /dev/net/tun and writable /proc/sys
+  volumes:
+    - ./node.sh:/e2e/node.sh:ro
+    - ${RVT_BIN_DIR:?}:/opt/rvt:ro
+
+services:
+  isp:
+    <<: *node
+    command: ["/e2e/node.sh", "isp"]
+    networks:
+      isp1: { ipv4_address: 10.201.1.254 }
+      isp2: { ipv4_address: 10.201.2.254 }
+      cloud: { ipv4_address: 10.201.3.254 }
+  cloud:
+    <<: *node
+    command: ["/e2e/node.sh", "echo", "10.201.3.254"]
+    networks:
+      cloud: { ipv4_address: 10.201.3.10 }
+  home1:
+    <<: *node
+    command: ["/e2e/node.sh", "home1", "10.201.1.254"]
+    networks:
+      isp1: { ipv4_address: 10.201.1.10 }
+  nat2:
+    <<: *node
+    command: ["/e2e/node.sh", "nat2", "10.201.2.254"]
+    networks:
+      isp2: { ipv4_address: 10.201.2.10 }
+      lan2: { ipv4_address: 192.168.77.254 }
+  home2:
+    <<: *node
+    command: ["/e2e/node.sh", "home2", "192.168.77.254"]
+    networks:
+      lan2: { ipv4_address: 192.168.77.10 }
+  web:
+    <<: *node
+    command: ["/e2e/node.sh", "echo", "192.168.77.254"]
+    networks:
+      lan2: { ipv4_address: 192.168.77.20 }
+
+networks:
+  isp1:
+    driver: macvlan
+    internal: true
+    ipam: { config: [{ subnet: 10.201.1.0/24 }] }
+  isp2:
+    driver: macvlan
+    internal: true
+    ipam: { config: [{ subnet: 10.201.2.0/24 }] }
+  cloud:
+    driver: macvlan
+    internal: true
+    ipam: { config: [{ subnet: 10.201.3.0/24 }] }
+  lan2:
+    driver: macvlan
+    internal: true
+    ipam: { config: [{ subnet: 192.168.77.0/24 }] }

@@ -1,0 +1,13 @@
+0:	from all lookup 255
+5210:	from all fwmark 0x80000/0xff0000 lookup 254
+5250:	from all fwmark 0x123 lookup 254 suppress_prefixlength 0
+5250:	from all fwmark 0x80000/0xff0000 unreachable
+5250:	from all lookup 254 suppress_prefixlength 0 proto 86
+5251:	from all fwmark 0x5256 lookup 254 proto 86
+5252:	from all iif lo lookup 21078 proto 86
+5252:	from all iif lo lookup 21078 proto 86
+5252:	from all iif lo lookup 52
+5252:	from all iif lo lookup 21078
+5270:	from all lookup 52
+32766:	from all lookup 254
+32767:	from all lookup 253

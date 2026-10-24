@@ -1,0 +1,10 @@
+default via 192.168.1.1 dev enp130s0 proto dhcp src 192.168.1.100 metric 100 
+default via 192.168.1.1 dev wlp131s0f0 proto dhcp src 192.168.1.192 metric 600 
+blackhole 10.99.0.0/16 
+10.200.0.0/16 proto static metric 20 
+	nexthop via 192.168.1.2 dev enp130s0 weight 1 
+	nexthop via 192.168.1.3 dev enp130s0 weight 1 
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 
+172.18.0.0/16 dev br-393fecf036cb proto kernel scope link src 172.18.0.1 linkdown 
+192.168.1.0/24 dev enp130s0 proto kernel scope link src 192.168.1.100 metric 100 
+192.168.1.53 via 192.168.1.1 dev enp130s0 
