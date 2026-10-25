@@ -21,6 +21,18 @@ const (
 	// data packet and sent nothing back sends a keepalive this soon.
 	PeerReplyWithin = device.KeepaliveTimeout
 
+	// Two 32-byte transports cover one persistent and one passive keepalive
+	// per tick: each has a 16-byte header and 16-byte authentication tag.
+	KeepaliveTxAllowance = 2 * device.MessageKeepaliveSize
+
+	// FastDeadAfter tolerates one lost passive reply. After 10s plus a late
+	// tick we probe again; allow another 10s reply, one sample tick and 1s RTT.
+	FastDeadAfter = 2*PeerReplyWithin + 2*TickInterval + time.Second
+
+	// Our IPv4 ICMP probe is padded to 16 bytes before its 32-byte transport
+	// overhead. Do not mistake our idle ping-pong for user traffic.
+	probeTransportSize = uint64(((20+8+len(probePayload)+15)/16)*16 + device.MessageKeepaliveSize)
+
 	// WorstRxGap is the longest rx silence the loop sees from a healthy peer
 	// when only probes make it talk (both keepalive timers lost the race):
 	// the probe leaves up to one tick after ProbeAfter, the peer answers
@@ -50,17 +62,33 @@ const (
 // Both sides keep persistent keepalive, but a received keepalive resets the
 // local timer, so one side can stay silent for rounds. ShouldProbe covers it.
 type Liveness struct {
-	timeout time.Duration
-	lastRx  uint64
-	rxAt    time.Duration
-	hasRx   bool
-	deadAt  time.Time
-	isAlive bool
+	timeout      time.Duration
+	lastRx       uint64
+	rxAt         time.Duration
+	hasRx        bool
+	deadAt       time.Time
+	isAlive      bool
+	trackTraffic bool
+	lastTx       uint64
+	probeTx      uint64
+	dataAt       time.Duration
+	hasData      bool
 }
 
-func NewLiveness(timeout time.Duration) *Liveness {
-	return &Liveness{timeout: timeout}
+func NewLiveness(timeout time.Duration, trackTraffic bool) *Liveness {
+	return &Liveness{timeout: timeout, trackTraffic: trackTraffic}
 }
+
+// MarkDead requires a handshake newer than the notice before accepting the peer again.
+func (l *Liveness) MarkDead(now time.Time) {
+	if now.After(l.deadAt) {
+		l.deadAt = now
+	}
+	l.isAlive, l.hasData = false, false
+}
+
+// RecordProbe excludes one pending probe from the next transmitted data sample.
+func (l *Liveness) RecordProbe() { l.probeTx = probeTransportSize }
 
 // Update feeds one sample and reports liveness. now is wall clock, compared
 // with WireGuard handshake times; mono is a monotonic reading for rx age, so
@@ -68,13 +96,24 @@ func NewLiveness(timeout time.Duration) *Liveness {
 // than the death counts (hysteresis).
 func (l *Liveness) Update(now time.Time, mono time.Duration, s Stats) bool {
 	// != instead of >: replacing the peer resets the counter.
-	if s.RxBytes != l.lastRx {
+	isRxChanged := s.RxBytes != l.lastRx
+	if isRxChanged {
 		l.lastRx = s.RxBytes
 		l.rxAt, l.hasRx = mono, true
+		l.hasData = false
 	}
+	if l.trackTraffic && s.TxBytes >= l.lastTx {
+		tx := s.TxBytes - l.lastTx
+		probe := min(tx, l.probeTx)
+		tx, l.probeTx = tx-probe, l.probeTx-probe
+		if !isRxChanged && tx > KeepaliveTxAllowance && !l.hasData {
+			l.dataAt, l.hasData = mono, true
+		}
+	}
+	l.lastTx = s.TxBytes
 	isAlive := l.hasRx && mono-l.rxAt <= l.timeout &&
 		!s.LastHandshake.IsZero() && now.Sub(s.LastHandshake) < MaxHandshakeAge &&
-		s.LastHandshake.After(l.deadAt)
+		s.LastHandshake.After(l.deadAt) && (!l.hasData || mono-l.dataAt < FastDeadAfter)
 	if l.isAlive && !isAlive {
 		l.deadAt = now
 	}
@@ -85,5 +124,6 @@ func (l *Liveness) Update(now time.Time, mono time.Duration, s Stats) bool {
 // ShouldProbe reports whether a live peer has been quiet for ProbeAfter, so a
 // probe should make it send something before the dead timeout.
 func (l *Liveness) ShouldProbe(mono time.Duration) bool {
-	return l.isAlive && mono-l.rxAt >= ProbeAfter
+	return l.isAlive && (mono-l.rxAt >= ProbeAfter ||
+		l.hasData && mono-l.dataAt >= PeerReplyWithin+TickInterval)
 }

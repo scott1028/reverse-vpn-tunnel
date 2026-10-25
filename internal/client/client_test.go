@@ -188,7 +188,7 @@ func TestResolveIPv4(t *testing.T) {
 
 func TestClientProbesQuietServer(t *testing.T) {
 	h := newHarness(t, 0)
-	h.c.live = tunnel.NewLiveness(35 * time.Second)
+	h.c.live = tunnel.NewLiveness(35*time.Second, false)
 	h.tick(t, 500, 1)
 	for h.sec < 20 {
 		h.tick(t, 500, 1)

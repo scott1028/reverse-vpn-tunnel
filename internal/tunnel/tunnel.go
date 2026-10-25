@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -15,16 +17,20 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+const probePayload = "reverse-vpn-tunnel probe"
+
 // Tunnel is one TUN interface with a WireGuard device and a single peer.
 type Tunnel struct {
-	dev      *device.Device
-	bind     conn.Bind
-	name     string
-	probeSeq int
+	dev          *device.Device
+	bind         conn.Bind
+	name         string
+	probeSeq     int
+	Goodbyes     <-chan time.Time
+	allowGoodbye atomic.Bool
 }
 
-// Open creates the TUN interface. The device stays down until Up.
-func Open(mtu int) (*Tunnel, error) {
+// Open creates TUN and installs the goodbye guard for this node's role.
+func Open(mtu int, serverIP, clientIP netip.Addr, isServer bool) (*Tunnel, error) {
 	tdev, err := tun.CreateTUN(ifaceName, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create TUN %s: %w", ifaceName, err)
@@ -34,14 +40,23 @@ func Open(mtu int) (*Tunnel, error) {
 		tdev.Close()
 		return nil, err
 	}
+	t := &Tunnel{name: name}
+	if isServer {
+		goodbyes := make(chan time.Time, 1)
+		t.Goodbyes = goodbyes
+		tdev = &goodbyeFilter{Device: tdev, local: serverIP, peer: clientIP, goodbyes: goodbyes}
+	} else {
+		tdev = &goodbyeReadFilter{Device: tdev, local: serverIP, peer: clientIP, allowGoodbye: &t.allowGoodbye}
+	}
 	logger := &device.Logger{
 		Verbosef: device.DiscardLogf,
 		Errorf: func(format string, args ...any) {
 			slog.Warn("wireguard: " + fmt.Sprintf(format, args...))
 		},
 	}
-	bind := newBind()
-	return &Tunnel{dev: device.NewDevice(tdev, bind, logger), bind: bind, name: name}, nil
+	t.bind = newBind()
+	t.dev = device.NewDevice(tdev, t.bind, logger)
+	return t, nil
 }
 
 // Name is the OS interface name (rvt0, or utunN assigned by macOS).
@@ -84,7 +99,7 @@ func (t *Tunnel) Probe(dst netip.Addr) error {
 	t.probeSeq++
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
-		Body: &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: t.probeSeq & 0xffff, Data: []byte("reverse-vpn-tunnel probe")},
+		Body: &icmp.Echo{ID: os.Getpid() & 0xffff, Seq: t.probeSeq & 0xffff, Data: []byte(probePayload)},
 	}
 	b, err := msg.Marshal(nil)
 	if err != nil {

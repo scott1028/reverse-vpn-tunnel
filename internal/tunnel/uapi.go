@@ -69,6 +69,7 @@ func Redact(uapi string) string {
 type Stats struct {
 	LastHandshake time.Time
 	RxBytes       uint64
+	TxBytes       uint64
 	Endpoint      string
 }
 
@@ -89,6 +90,8 @@ func ParseStats(uapi string) (Stats, error) {
 			nsec, err = strconv.ParseInt(value, 10, 64)
 		case "rx_bytes":
 			s.RxBytes, err = strconv.ParseUint(value, 10, 64)
+		case "tx_bytes":
+			s.TxBytes, err = strconv.ParseUint(value, 10, 64)
 		case "endpoint":
 			s.Endpoint = value
 		}

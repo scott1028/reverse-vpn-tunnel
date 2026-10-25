@@ -84,7 +84,7 @@ func TestParseStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Stats{LastHandshake: time.Unix(1700000000, 500), RxBytes: 5678, Endpoint: "203.0.113.7:40000"}
+	want := Stats{LastHandshake: time.Unix(1700000000, 500), RxBytes: 5678, TxBytes: 1234, Endpoint: "203.0.113.7:40000"}
 	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -93,8 +93,10 @@ func TestParseStats(t *testing.T) {
 	if err != nil || !got.LastHandshake.IsZero() {
 		t.Fatalf("no handshake must give zero time: %+v %v", got, err)
 	}
-	if _, err := ParseStats("rx_bytes=abc\n"); err == nil {
-		t.Fatal("want parse error")
+	for _, uapi := range []string{"rx_bytes=abc\n", "tx_bytes=invalid\n"} {
+		if _, err := ParseStats(uapi); err == nil {
+			t.Fatalf("want parse error for %q", uapi)
+		}
 	}
 }
 
@@ -142,7 +144,7 @@ func TestLiveness(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := NewLiveness(45 * time.Second)
+			l := NewLiveness(45*time.Second, false)
 			for _, s := range tt.samples {
 				st := Stats{RxBytes: s.rx}
 				if s.handshake >= 0 {
@@ -158,7 +160,7 @@ func TestLiveness(t *testing.T) {
 
 func TestLivenessIgnoresWallClockJumps(t *testing.T) {
 	wall := time.Unix(1_700_000_000, 0)
-	l := NewLiveness(45 * time.Second)
+	l := NewLiveness(45*time.Second, false)
 	if !l.Update(wall, 0, Stats{RxBytes: 100, LastHandshake: wall}) {
 		t.Fatal("want alive")
 	}
@@ -170,7 +172,7 @@ func TestLivenessIgnoresWallClockJumps(t *testing.T) {
 
 func TestShouldProbe(t *testing.T) {
 	wall := time.Unix(1_700_000_000, 0)
-	l := NewLiveness(45 * time.Second)
+	l := NewLiveness(45*time.Second, false)
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
 	update := func(n int, rx uint64) { l.Update(wall.Add(sec(n)), sec(n), Stats{RxBytes: rx, LastHandshake: wall}) }
 
@@ -206,5 +208,116 @@ func TestMinDeadPeerTimeoutCoversWorstRxGap(t *testing.T) {
 	// leave late and 1s round trip.
 	if need := LostReplyRxGap + time.Second + TickInterval; got < need {
 		t.Fatalf("MinDeadPeerTimeoutSec = %v, need at least %v for a lost reply", got, need)
+	}
+}
+
+func TestFastDeadAfterMatchesDocs(t *testing.T) {
+	// The documented 25-second limit is the value agreed with the user.
+	if FastDeadAfter != 25*time.Second {
+		t.Fatalf("FastDeadAfter = %v, want 25s", FastDeadAfter)
+	}
+}
+
+func TestKeepaliveTxAllowanceMatchesDocs(t *testing.T) {
+	if KeepaliveTxAllowance != 64 {
+		t.Fatalf("KeepaliveTxAllowance = %d, want 64", KeepaliveTxAllowance)
+	}
+}
+
+func TestGoodbyeRequiresNewHandshake(t *testing.T) {
+	wall := time.Unix(1_700_000_000, 0)
+	live := NewLiveness(45*time.Second, false)
+	stats := Stats{RxBytes: 100, LastHandshake: wall}
+	if !live.Update(wall, 0, stats) {
+		t.Fatal("initial peer is not alive")
+	}
+	live.MarkDead(wall.Add(time.Second))
+	if live.ShouldProbe(20 * time.Second) {
+		t.Fatal("goodbye must mark dead immediately")
+	}
+	stats.RxBytes++
+	if live.Update(wall.Add(2*time.Second), 2*time.Second, stats) {
+		t.Fatal("old handshake revived peer after goodbye")
+	}
+	stats.RxBytes++
+	stats.LastHandshake = wall.Add(3 * time.Second)
+	if !live.Update(wall.Add(4*time.Second), 4*time.Second, stats) {
+		t.Fatal("fresh handshake did not revive peer")
+	}
+}
+
+func TestKeepalivesAndIdleProbesKeepConfiguredTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{45 * time.Second, 120 * time.Second} {
+		for _, probe := range []bool{false, true} {
+			wall := time.Unix(1_700_000_000, 0)
+			live := NewLiveness(timeout, true)
+			stats := Stats{RxBytes: 100, LastHandshake: wall}
+			for elapsed := time.Duration(0); elapsed <= timeout+TickInterval; elapsed += TickInterval {
+				stats.TxBytes += KeepaliveTxAllowance
+				got := live.Update(wall.Add(elapsed), elapsed, stats)
+				if want := elapsed <= timeout; got != want {
+					t.Fatalf("timeout=%s probe=%v elapsed=%s: alive=%v want %v", timeout, probe, elapsed, got, want)
+				}
+				if probe && live.ShouldProbe(elapsed) {
+					live.RecordProbe()
+					stats.TxBytes += probeTransportSize
+				}
+			}
+		}
+	}
+}
+
+func TestUnansweredDataDiesAtFastDeadline(t *testing.T) {
+	wall := time.Unix(1_700_000_000, 0)
+	live := NewLiveness(45*time.Second, true)
+	stats := Stats{RxBytes: 100, LastHandshake: wall}
+	live.Update(wall, 0, stats)
+	stats.TxBytes = KeepaliveTxAllowance + 1
+	live.Update(wall.Add(TickInterval), TickInterval, stats)
+	probeAt := TickInterval + PeerReplyWithin + TickInterval
+	if live.ShouldProbe(probeAt-time.Nanosecond) || !live.ShouldProbe(probeAt) {
+		t.Fatal("unanswered traffic probe does not start after the reply window")
+	}
+	deadline := TickInterval + FastDeadAfter
+	if !live.Update(wall.Add(deadline-time.Nanosecond), deadline-time.Nanosecond, stats) {
+		t.Fatal("peer died before fast deadline")
+	}
+	if live.Update(wall.Add(deadline), deadline, stats) {
+		t.Fatal("peer alive at fast deadline")
+	}
+	stats.RxBytes++
+	if live.Update(wall.Add(deadline+TickInterval), deadline+TickInterval, stats) {
+		t.Fatal("fast death accepted an old handshake")
+	}
+}
+
+func TestReplyResetsUnansweredTraffic(t *testing.T) {
+	for _, replyAt := range []time.Duration{5 * time.Second, TickInterval + FastDeadAfter - time.Nanosecond} {
+		wall := time.Unix(1_700_000_000, 0)
+		live := NewLiveness(45*time.Second, true)
+		stats := Stats{RxBytes: 100, LastHandshake: wall}
+		live.Update(wall, 0, stats)
+		stats.TxBytes += 1000
+		live.Update(wall.Add(TickInterval), TickInterval, stats)
+		stats.RxBytes++
+		if !live.Update(wall.Add(replyAt), replyAt, stats) {
+			t.Fatal("reply did not keep peer alive")
+		}
+		if !live.Update(wall.Add(30*time.Second), 30*time.Second, stats) {
+			t.Fatalf("reply at %v did not clear first unanswered data tick", replyAt)
+		}
+	}
+}
+
+func TestExitNodeDoesNotUseFastDeadline(t *testing.T) {
+	wall := time.Unix(1_700_000_000, 0)
+	live := NewLiveness(45*time.Second, false)
+	stats := Stats{RxBytes: 100, LastHandshake: wall}
+	live.Update(wall, 0, stats)
+	for elapsed := TickInterval; elapsed <= 44*time.Second; elapsed += TickInterval {
+		stats.TxBytes += 1000
+		if !live.Update(wall.Add(elapsed), elapsed, stats) {
+			t.Fatal("exit node used the fast deadline")
+		}
 	}
 }

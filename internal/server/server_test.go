@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +84,7 @@ func runEvents(t *testing.T, cfg config.Server, sys *fakeSystem, events []event)
 		}
 		return config.Server{}, false, nil
 	}
-	s := New(cfg, tun, sys, reload)
+	s := New(cfg, tun, sys, reload, nil)
 	at := func(sec int) time.Time { return t0.Add(time.Duration(sec) * time.Second) }
 	prev := -TickSec
 	for _, ev := range events {
@@ -234,7 +237,7 @@ func TestServerRetriesFailedRollback(t *testing.T) {
 		})
 	})
 	t.Run("close reports a failed rollback", func(t *testing.T) {
-		s := New(testConfig(), &fakeTunnel{}, &fakeSystem{rollbackFails: 1}, func() (config.Server, bool, error) { return config.Server{}, false, nil })
+		s := New(testConfig(), &fakeTunnel{}, &fakeSystem{rollbackFails: 1}, func() (config.Server, bool, error) { return config.Server{}, false, nil }, nil)
 		if err := s.Close(); err == nil {
 			t.Fatal("Close reported success")
 		}
@@ -265,7 +268,7 @@ func TestServerSlowStepIsNotWake(t *testing.T) {
 	clock := t0
 	tun := &fakeTunnel{}
 	sys := &slowRouteSystem{fakeSystem: &fakeSystem{}, advance: func() { clock = clock.Add(8 * time.Second) }}
-	s := New(testConfig(), tun, sys, func() (config.Server, bool, error) { return config.Server{}, false, nil })
+	s := New(testConfig(), tun, sys, func() (config.Server, bool, error) { return config.Server{}, false, nil }, nil)
 	now := func() time.Time { return clock }
 	if err := s.tick(now); err != nil { // the route query takes 8s
 		t.Fatal(err)
@@ -289,4 +292,103 @@ type slowRouteSystem struct {
 func (s *slowRouteSystem) DefaultRoute() (netsys.Route, error) {
 	s.advance()
 	return s.fakeSystem.DefaultRoute()
+}
+
+func TestGoodbyeRollsBackInSameStep(t *testing.T) {
+	wall := time.Unix(1_700_000_000, 0)
+	tun := &fakeTunnel{stats: tunnel.Stats{RxBytes: 100, LastHandshake: wall}}
+	sys := &fakeSystem{}
+	goodbyes := make(chan time.Time, 1)
+	srv := New(config.DefaultServer(), tun, sys, func() (config.Server, bool, error) {
+		return config.Server{}, false, nil
+	}, goodbyes)
+	srv.epoch = wall
+	if err := srv.Step(wall); err != nil {
+		t.Fatal(err)
+	}
+	goodbyes <- wall.Add(time.Second)
+	sys.calls = nil
+	if err := srv.Step(wall.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sys.calls, []string{"rollback"}) {
+		t.Fatalf("goodbye did not restore routing in the same step: %v", sys.calls)
+	}
+}
+
+func TestUnansweredTrafficRestoresLocalRoute(t *testing.T) {
+	wall := time.Unix(1_700_000_000, 0)
+	tun := &fakeTunnel{stats: tunnel.Stats{RxBytes: 100, LastHandshake: wall}}
+	sys := &fakeSystem{}
+	srv := New(config.DefaultServer(), tun, sys, func() (config.Server, bool, error) {
+		return config.Server{}, false, nil
+	}, nil)
+	srv.epoch = wall
+	if err := srv.Step(wall); err != nil {
+		t.Fatal(err)
+	}
+	deathTick := TickInterval + (tunnel.FastDeadAfter+TickInterval-1)/TickInterval*TickInterval
+	for elapsed := TickInterval; elapsed <= deathTick; elapsed += TickInterval {
+		tun.stats.TxBytes += 1000
+		if err := srv.Step(wall.Add(elapsed)); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed < deathTick {
+			if !srv.isApplied || !reflect.DeepEqual(sys.calls, []string{"apply+v6block"}) {
+				t.Fatalf("routing restored too soon at %v: %v", elapsed, sys.calls)
+			}
+		} else if srv.isApplied || !reflect.DeepEqual(sys.calls, []string{"apply+v6block", "rollback"}) {
+			t.Fatalf("routing was not restored at first death tick %v: %v", elapsed, sys.calls)
+		}
+	}
+}
+
+func TestGoodbyeLogsOnlyLiveToDead(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		isAlive      bool
+		isRestarted  bool
+		wantMessages int
+	}{
+		{"alive then duplicate", true, false, 1},
+		{"already dead", false, false, 0},
+		{"newer handshake", true, true, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			wall := time.Unix(1_700_000_000, 0)
+			tun := &fakeTunnel{}
+			if test.isAlive {
+				tun.stats = tunnel.Stats{RxBytes: 100, LastHandshake: wall}
+			}
+			goodbyes := make(chan time.Time, 1)
+			srv := New(config.DefaultServer(), tun, &fakeSystem{}, func() (config.Server, bool, error) {
+				return config.Server{}, false, nil
+			}, goodbyes)
+			srv.epoch = wall
+			if err := srv.Step(wall); err != nil {
+				t.Fatal(err)
+			}
+			goodbyes <- wall.Add(time.Second)
+			if test.isRestarted {
+				tun.stats.RxBytes++
+				tun.stats.LastHandshake = wall.Add(1500 * time.Millisecond)
+			}
+			if err := srv.Step(wall.Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if !test.isRestarted {
+				goodbyes <- wall.Add(3 * time.Second)
+				if err := srv.Step(wall.Add(4 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := strings.Count(logs.String(), "exit node said goodbye"); got != test.wantMessages {
+				t.Fatalf("goodbye log count %d, want %d: %s", got, test.wantMessages, logs.String())
+			}
+		})
+	}
 }

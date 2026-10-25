@@ -66,7 +66,7 @@ func New(cfg config.Client, k keys.Keys, tun Tunnel, sys System, resolve Resolve
 	serverIP, _ := netsys.TunnelAddrs(cfg.TunnelCIDR)
 	return &Client{
 		cfg: cfg, keys: k, tun: tun, sys: sys, resolve: resolve,
-		live: tunnel.NewLiveness(timeout), peerIP: serverIP, epoch: time.Now(),
+		live: tunnel.NewLiveness(timeout, false), peerIP: serverIP, epoch: time.Now(),
 	}
 }
 

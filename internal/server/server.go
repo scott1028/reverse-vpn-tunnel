@@ -36,12 +36,13 @@ type System interface {
 type Reloader func() (cfg config.Server, isChanged bool, err error)
 
 type Server struct {
-	cfg    config.Server
-	tun    Tunnel
-	sys    System
-	reload Reloader
-	live   *tunnel.Liveness
-	peerIP netip.Addr
+	cfg      config.Server
+	tun      Tunnel
+	sys      System
+	reload   Reloader
+	goodbyes <-chan time.Time
+	live     *tunnel.Liveness
+	peerIP   netip.Addr
 	// epoch turns Step times into monotonic readings for rx age.
 	epoch time.Time
 
@@ -58,12 +59,12 @@ type Server struct {
 	isV6Blocked bool
 }
 
-func New(cfg config.Server, tun Tunnel, sys System, reload Reloader) *Server {
+func New(cfg config.Server, tun Tunnel, sys System, reload Reloader, goodbyes <-chan time.Time) *Server {
 	timeout := time.Duration(cfg.Reconnect.DeadPeerTimeoutSec) * time.Second
 	_, clientIP := netsys.TunnelAddrs(cfg.TunnelCIDR)
 	return &Server{
-		cfg: cfg, tun: tun, sys: sys, reload: reload,
-		live: tunnel.NewLiveness(timeout), peerIP: clientIP, epoch: time.Now(),
+		cfg: cfg, tun: tun, sys: sys, reload: reload, goodbyes: goodbyes,
+		live: tunnel.NewLiveness(timeout, true), peerIP: clientIP, epoch: time.Now(),
 	}
 }
 
@@ -109,11 +110,22 @@ func (s *Server) Step(now time.Time) error {
 		return err
 	}
 	mono := now.Sub(s.epoch)
+	hasGoodbye := false
+	select {
+	case received := <-s.goodbyes:
+		s.live.MarkDead(received)
+		hasGoodbye = true
+	default:
+	}
 	isAlive := s.live.Update(now, mono, stats)
+	if hasGoodbye && s.isAlive && !isAlive {
+		slog.Info("exit node said goodbye")
+	}
 	if s.live.ShouldProbe(mono) {
 		if err := s.tun.Probe(s.peerIP); err != nil {
 			slog.Warn("probe peer", "err", err)
 		} else {
+			s.live.RecordProbe()
 			slog.Debug("probe sent", "to", s.peerIP)
 		}
 	}

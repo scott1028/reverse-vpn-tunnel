@@ -16,6 +16,8 @@ const (
 	ClientFile = "reverse-vpn-tunnel.client.jsonc"
 
 	MinAPIKeyLen = 20
+	// ControlPort is the inner UDP destination port for shutdown notices.
+	ControlPort = 51821
 	// KeepaliveSec is the fixed persistent keepalive on both sides.
 	KeepaliveSec = 15
 	// MinDeadPeerTimeoutSec must exceed the longest rx gap of a healthy idle

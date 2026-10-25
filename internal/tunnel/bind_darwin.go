@@ -15,6 +15,14 @@ import (
 // macOS assigns utunN itself.
 const ifaceName = "utun"
 
+func bindControlSocket(fd int, iface string) error {
+	ifc, err := net.InterfaceByName(iface)
+	if err != nil {
+		return err
+	}
+	return unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_BOUND_IF, ifc.Index)
+}
+
 // boundBind is an IPv4-only conn.Bind whose socket is pinned to the physical
 // interface with IP_BOUND_IF, so WireGuard packets never loop into the
 // tunnel while 0/1 + 128/1 point at utun.

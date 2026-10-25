@@ -275,3 +275,12 @@ func TestAliasErrorsNameConfiguredKey(t *testing.T) {
 		}
 	}
 }
+
+func TestServerAllowsControlPort(t *testing.T) {
+	cfg := DefaultServer()
+	cfg.APIKey = testKey
+	cfg.ListenPort = ControlPort
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("inner destination port must not reserve a kernel listener: %v", err)
+	}
+}

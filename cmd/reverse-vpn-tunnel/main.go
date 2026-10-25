@@ -195,12 +195,12 @@ func runServer(ctx context.Context, cfg config.Server, watcher *config.Watcher) 
 		return err
 	}
 
-	tun, err := tunnel.Open(cfg.MTU)
+	serverIP, clientIP := netsys.TunnelAddrs(cfg.TunnelCIDR)
+	tun, err := tunnel.Open(cfg.MTU, serverIP, clientIP, true)
 	if err != nil {
 		return err
 	}
 	defer tun.Close()
-	serverIP, clientIP := netsys.TunnelAddrs(cfg.TunnelCIDR)
 	if err := sys.SetupInterface(tun.Name(), netip.PrefixFrom(serverIP, cfg.TunnelCIDR.Bits()), clientIP); err != nil {
 		return err
 	}
@@ -231,7 +231,7 @@ func runServer(ctx context.Context, cfg config.Server, watcher *config.Watcher) 
 		cfg, err := watcher.LoadServer()
 		return cfg, err == nil, err
 	}
-	srv := server.New(cfg, tun, sys, reload)
+	srv := server.New(cfg, tun, sys, reload, tun.Goodbyes)
 	runErr := srv.Run(ctx)
 	restoreErr = srv.Close()
 	slog.Info("server stopped")
@@ -270,12 +270,12 @@ func runClient(ctx context.Context, cfg config.Client) error {
 		return err
 	}
 
-	tun, err := tunnel.Open(cfg.MTU)
+	serverIP, clientIP := netsys.TunnelAddrs(cfg.TunnelCIDR)
+	tun, err := tunnel.Open(cfg.MTU, serverIP, clientIP, false)
 	if err != nil {
 		return err
 	}
 	defer tun.Close()
-	serverIP, clientIP := netsys.TunnelAddrs(cfg.TunnelCIDR)
 	if err := sys.SetupInterface(tun.Name(), netip.PrefixFrom(clientIP, cfg.TunnelCIDR.Bits()), serverIP); err != nil {
 		return err
 	}
@@ -295,6 +295,11 @@ func runClient(ctx context.Context, cfg config.Client) error {
 	cli := client.New(cfg, k, tun, sys, client.ResolveIPv4)
 	cli.Start(time.Now)
 	runErr := cli.Run(ctx)
+	if ctx.Err() != nil {
+		if err := tun.SendGoodbye(clientIP, serverIP); err != nil {
+			slog.Warn("send exit node goodbye", "err", err)
+		}
+	}
 	restoreErr = sys.RemoveForwarding()
 	slog.Info("client stopped")
 	return runErr

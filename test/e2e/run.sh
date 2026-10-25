@@ -38,6 +38,22 @@ wait_eq() {
   return 1
 }
 
+# Bound fast fail-open checks by elapsed time, including each curl timeout.
+wait_fast_eq() {
+  local timeout=$1 want=$2 got="" started=$SECONDS
+  shift 2
+  while ((SECONDS - started <= timeout)); do
+    got=$("$@" 2>/dev/null || true)
+    if [ "$got" = "$want" ] && ((SECONDS - started <= timeout)); then
+      echo "  restored after $((SECONDS - started))s (limit ${timeout}s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "  last output: '$got', want '$want' within ${timeout}s"
+  return 1
+}
+
 # wait_ok <seconds> <cmd...>: poll until cmd succeeds.
 wait_ok() {
   local timeout=$1
@@ -181,13 +197,36 @@ check "self-repair puts the jump back first" \
   wait_ok 45 dx exit sh -c 'iptables -S FORWARD | sed -n 2p | grep -qx -- "-A FORWARD -j RVT-FWD"'
 check "after repair: echo sees nat2" wait_eq 15 "$NAT2_IP" echo_ip
 
-echo "== 4. client paused: fail-open, then back"
+echo "== 4. clean exit node stop: fast fail-open, then reconnect"
+entry_filter_before=$(dx entry iptables-save -t filter)
+entry_input_before=$(dx entry iptables -S INPUT)
+dx entry iptables -F INPUT
+dx entry iptables -A INPUT -i lo -j ACCEPT
+dx entry iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+dx entry iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+dx entry iptables -P INPUT DROP
+check "clean stop: entry INPUT is default-deny" \
+  dx entry sh -c 'test "$(iptables -S INPUT | head -n 1)" = "-P INPUT DROP"'
+srv_mark=$(log_lines entry /work/server.log)
+dx exit pkill -TERM -f "reverse-vpn-tunnel --client"
+check "clean stop: echo sees entry within 6s" wait_fast_eq 6 "$ENTRY_IP" echo_ip
+check "clean stop: server received goodbye" \
+  wait_ok 6 logged_since entry /work/server.log "$srv_mark" 'exit node said goodbye'
+dx entry iptables-restore <<<"$entry_filter_before"
+check "clean stop: original INPUT policy and rules restored" \
+  test "$(dx entry iptables -S INPUT)" = "$entry_input_before"
+check "clean stop: client exited" \
+  wait_eq 10 gone dx exit sh -c 'pgrep -f "[r]everse-vpn-tunnel --client" >/dev/null || echo gone'
+compose exec -d -T exit sh -c "cd /work && exec /opt/rvt/reverse-vpn-tunnel --client --debug >>/work/client.log 2>&1"
+check "client restarted: echo sees nat2" wait_eq 60 "$NAT2_IP" echo_ip
+
+echo "== 5. exit node paused with traffic: fast fail-open, then back"
 compose pause exit
-check "paused: echo sees entry after dead_peer_timeout" wait_eq $((DEAD_TIMEOUT + 45)) "$ENTRY_IP" echo_ip
+check "paused with traffic: echo sees entry within 38s" wait_fast_eq 38 "$ENTRY_IP" echo_ip
 compose unpause exit
 check "unpaused: echo sees nat2 again" wait_eq 90 "$NAT2_IP" echo_ip
 
-echo "== 5. SIGTERM leaves nothing behind"
+echo "== 6. SIGTERM leaves nothing behind"
 stopped_clean TERM
 
 echo "== F6. SIGHUP (closed SSH session) cleans up the same way"

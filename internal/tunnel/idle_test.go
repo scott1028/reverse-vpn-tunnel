@@ -68,6 +68,7 @@ func (s *idleSide) sample(t *testing.T, now time.Time, mono time.Duration) {
 	s.wasAlive = s.wasAlive || isAlive
 	if s.live.ShouldProbe(mono) {
 		s.tun.Outbound <- tuntest.Ping(s.peer, s.self)
+		s.live.RecordProbe()
 		s.probes++
 	}
 }
@@ -137,8 +138,8 @@ func TestIdlePeerStaysAlive(t *testing.T) {
 
 			timeout := time.Duration(config.MinDeadPeerTimeoutSec) * time.Second
 			sides := []*idleSide{
-				{name: "server", dev: srv, tun: stun, self: serverIP, peer: clientIP, live: NewLiveness(timeout)},
-				{name: "client", dev: cli, tun: ctun, self: clientIP, peer: serverIP, live: NewLiveness(timeout)},
+				{name: "server", dev: srv, tun: stun, self: serverIP, peer: clientIP, live: NewLiveness(timeout, true)},
+				{name: "client", dev: cli, tun: ctun, self: clientIP, peer: serverIP, live: NewLiveness(timeout, false)},
 			}
 			start := time.Now()
 			ticker := time.NewTicker(TickInterval)
