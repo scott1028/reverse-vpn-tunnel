@@ -19,7 +19,8 @@
 | DNS／A 記錄 | DNS 將名稱查成位址；A 記錄提供 IPv4 位址。 |
 | root／sudo | root 是系統管理員身分；sudo 讓你用管理員身分執行命令。 |
 | dead peer timeout | 多久收不到對端封包就視為斷線；設定名為 `dead_peer_timeout_sec`。 |
-| fail-open | 對端斷線時，entry node 改回本地路由繼續上網；它不是斷線封網機制。 |
+| 判死 | 認定對方已斷線。 |
+| fail-open | 對端判死後，entry node 才恢復本地路由；判死前流量會卡在隧道，它不是斷線封網機制。 |
 | state file | 程式記下原始系統值與復原資訊的檔案，讓下次啟動能處理當機遺留設定。 |
 | lock file | 每個角色各自的鎖定檔，同一台機器的同一角色不能同時開兩個實例。 |
 | CIDR | 用位址與斜線後的位元數表示網段，例如 `/24` 有 256 個位址；較小的位元數代表較大的網段。 |
@@ -35,8 +36,14 @@
 | handshake／keepalive／probe | handshake 建立加密工作階段；keepalive 維持連線；probe 是程式送出的 ICMP echo 探測封包。 |
 | socket | 程式向作業系統收發網路封包的端點。 |
 | mtime／stderr | mtime 是檔案最後修改時間；stderr 是程序的標準錯誤輸出，預設顯示在終端。 |
+| SIGINT／SIGTERM／SIGHUP | 停止程序的訊號；`Ctrl-C` 送 SIGINT，關閉 SSH 或終端機會送 SIGHUP，本程式收到後會清理並停止。 |
+| SIGKILL | 強制停止且無法攔截的訊號，程式沒有機會清理。 |
+| tmux／service | tmux 保留終端工作階段；service 是交給系統長期管理的背景程序。 |
+| tick／ControlPort | tick 是迴圈的一次檢查；ControlPort 是隧道內告別通知的 UDP 目的埠，entry node 不會綁定這個埠。 |
+| GitHub Actions／workflow／job | GitHub Actions 執行自動化 workflow；job 是其中一組在 runner 機器執行的步驟。 |
+| tag／release／asset／draft | tag 標記 Git commit；release 是 GitHub 的版本頁，asset 是下載檔，draft 是尚未公開的 release。 |
+| checksum／SHA-256 | checksum 是檔案的檢查碼，這裡用 SHA-256 雜湊比對下載內容是否一致。 |
 | e2e／API | e2e 是端到端測試，這裡會測真實 Linux 網路；API 是供其他程式呼叫的介面。 |
-
 
 <a id="requirements"></a>
 
@@ -48,7 +55,7 @@
 |---|---|
 | OS | Linux 或 macOS；程式只提供這兩種系統的網路實作，沒有聲明最低 OS 版本。 |
 | 權限 | 兩端都用 root／sudo；一般使用者會收到 `must run as root (sudo)`。 |
-| 建置 | Go 1.26.8、make；建置會取得 `go.mod` 內的相依套件。 |
+| 建置 | Go 1.26.8 以上、make；建置會取得 `go.mod` 內的相依套件。 |
 | Linux 工具 | `ip`、`iptables`、`sysctl`，以及可用的 TUN；LAN alias 還需要 iptables 的 NETMAP 支援。 |
 | macOS 工具 | `ifconfig`、`route`、`pfctl`、`sysctl`；exit node 的 PF 主規則需要下述 anchor 入口。 |
 | entry node 網路 | 可連入的 IPv4 UDP 連接埠，預設 `51820`；路由器與防火牆要允許這條連線。 |
@@ -65,10 +72,10 @@
 你先啟動 entry node 並取得金鑰，再讓 exit node 用這把金鑰連入。
 
 ```text
-Time -------------------------------------------------------------------->
-you        | start entry | copy key and address | fill exit config | rerun exit
-entry node | create config and listen          | accept <-----------------+
-exit node  |                                   | create template  | dial -+
+Time ----------------------------------------------------------------------------------------------->
+you        | start entry   | run exit once    | copy key/address   | fill exit config   | rerun exit
+entry node | listen        |                  | share key/address  |                    | accept <--+
+exit node  |               | write template   |                    |                    | dial -----+
 ```
 
 `--server` 會持續執行；`--client` 在建立範本那次會正常退出。
@@ -76,7 +83,7 @@ exit node  |                                   | create template  | dial -+
 
 ### 在 entry node 建立設定
 
-你在 entry node 建置並啟動，程式會在目前目錄尋找 server 設定。
+你在 entry node 建置並啟動，程式會在目前目錄尋找 entry node 設定。
 
 ```sh
 make release
@@ -107,7 +114,7 @@ sudo ./reverse-vpn-tunnel --client
 你重新啟動時會沿用目前目錄的設定，程式不會覆蓋既有檔案。
 
 建立新檔使用 `0600` 權限；經 sudo 執行時，程式依 `SUDO_UID`、`SUDO_GID` 將新設定檔交還原使用者。
-若你仍帶 `--api-key`，它必須與 server 檔案一致；不同就退出，並提示你編輯檔案。
+若你仍帶 `--api-key`，它必須與 entry node 設定檔一致；不同就退出，並提示你編輯檔案。
 少填的欄位沿用預設值；未知欄位、格式錯誤或超出合法範圍會阻止啟動。
 
 <a id="daily-use"></a>
@@ -124,6 +131,12 @@ sudo ./reverse-vpn-tunnel --client
 | exit node | `connected to server` | 已確認 entry node 存活。 |
 | entry node | `forwarding all traffic through the exit node` | 已套用全流量路由。 |
 | entry node | `local routing restored` | 已撤回全流量路由；基礎隧道路由仍在。 |
+| entry node | `peer dead; restoring local routing` | 對端判死，開始恢復本地路由。 |
+| exit node | `server dead; redialing later` | entry node 判死，稍後會再連線。 |
+| exit node | `redialing server` | 正在嘗試重新連線。 |
+| entry node | `exit node said goodbye` | 告別通知讓對端從存活變成判死，接著由 `peer dead; restoring local routing` 記錄還原。 |
+| entry node | `config reloaded` | 讀取成功，兩個可即時更新的欄位已載入。 |
+| entry node | `config changes other than forward_all_traffic / block_ipv6 need a restart` | 有其他欄位變更，必須重啟才會套用。 |
 
 在 entry node 執行 `curl -4 https://ifconfig.me`，連線正常且 `forward_all_traffic: true` 時，應看到 exit node 網路的對外 IPv4。
 加 `--debug` 可看到唯讀系統命令與失敗資訊；修改系統的命令原本就會記錄，log 寫入 stderr，程式不另建 log 檔。
@@ -136,35 +149,72 @@ sudo ./reverse-vpn-tunnel --client
 
 | 設定變更 | 套用方式 |
 |---|---|
-| server `forward_all_traffic` | 存檔後套用；`false` 恢復本地路由，隧道與 LAN alias 路由保留。 |
-| server `block_ipv6` | 存檔後套用；只在全流量路由啟用時阻擋 IPv6。 |
-| server 其他欄位，含 `reconnect` | 需要重啟；即使同時修改，也只有上面兩個欄位會即時套用。 |
-| client 所有欄位 | 需要重啟；exit node 沒有設定監看器。 |
-| server 新設定不合法或讀取失敗 | 保留前一份設定，記錄 `config not applied; keeping previous settings`。 |
+| entry node `forward_all_traffic` | 存檔後套用；`false` 恢復本地路由，隧道與 LAN alias 路由保留。 |
+| entry node `block_ipv6` | 存檔後套用；只在全流量路由啟用時阻擋 IPv6。 |
+| entry node 其他欄位，含 `reconnect` | 需要重啟；即使同時修改，也只有上面兩個欄位會即時套用。 |
+| exit node 所有欄位 | 需要重啟；exit node 沒有設定監看器。 |
+| entry node 新設定不合法或讀取失敗 | 保留前一份設定，記錄 `config not applied; keeping previous settings`。 |
 
-監看器每個 2 秒迴圈比對 mtime 與大小，連續兩次相同才讀取；支援覆寫存檔與另存後 rename。
+監看器每 2 秒比對一次 mtime 與大小，連續兩次相同才讀取；支援覆寫存檔與另存後 rename。
 維持同一 mtime 與大小的編輯可能偵測不到；讀取失敗後要再存檔才重試，`SIGHUP` 會停止程式，不是重新載入。
 
 <a id="reconnect"></a>
 
 ## 對端沒回應時會怎麼恢復
 
-你不用在斷線後手動改預設路由，entry node 會撤回全流量設定並改用本地出口。
+你正在全流量轉送時若失聯，entry node 的流量會卡在隧道，直到判定對端已死才恢復本地出口。
 
 ```text
-Time -------------------------------------------------------------------->
-[alive] --stop receiving--> [dead: use local route] --fresh handshake--> [alive]
+Time -------------------------------------------------------------------------------->
+[forwarding] --lose replies--> [traffic stuck] --declare peer dead--> [local routing]
 ```
 
-這是 fail-open；網際網路連線不保證在切換時不中斷，也不會維持只准走隧道的限制。
+從未連上時維持本地路由；下表的等待時間針對原本正在轉送的連線。
+這是 fail-open，恢復後不會強制所有流量只能走隧道，切換時既有連線可能中斷。
+
+### 你會等多久
+
+你依 exit node 離線的方式估算等待時間，三種情況都要等判死後才恢復本地路由。
+
+| 情況 | 判死與恢復時機 |
+|---|---|
+| exit node 正常停止 | 收到告別通知後，同一次迴圈還原路由，約 1 tick（2 秒）。 |
+| 當機或斷線，entry node 仍在送資料 | 首個未回覆的資料 tick 起算約 `FastDeadAfter`（25 秒），下一個取樣確認後還原。 |
+| 完全閒置 | 沿用 ping-pong：靜默 18 秒後送 probe，超過 `dead_peer_timeout_sec` 才判死；預設 45 秒、最小 40 秒。 |
+
+tick 是每 2 秒一次的檢查；上表時間是約略值，還會受取樣與系統命令耗時影響。
+告別通知若送不到，就改由未回覆資料或閒置逾時判死；不會因發送告別失敗而卡住清理。
+
+### 正常停止怎麼通知另一端
+
+你不用開放額外的對外連接埠，告別通知只在已加密的隧道內傳送。
+
+| 項目 | 實際行為 |
+|---|---|
+| 控制通道 | entry node 在 WireGuard 解密後、寫入 TUN 前辨識通知；`ControlPort`（`51821`）只是隧道內的 UDP 目的埠，不會建立本機 listener 或占用埠。 |
+| 訊息與來源 | IPv4 UDP 的 payload 必須剛好是 `rvt-bye-1`，來源是 exit node 的隧道位址（預設 `10.77.0.2`），目的地是 entry node 的隧道位址（預設 `10.77.0.1`）與上述目的埠；符合時通知迴圈並吞掉封包。 |
+| 送出端防護 | exit node 在讀取 TUN 時丟棄符合告別格式的封包；只有自己開始發送告別才放行，且該次執行不再關閉放行狀態。 |
+| 發送與清理 | exit node 收到 SIGINT／SIGTERM／SIGHUP 後，在關閉隧道前發送 3 次，相隔約 100 ms；整段預算 400 ms，少於 500 ms，失敗只記錄警告；送出 socket 在 Linux 用 `SO_BINDTODEVICE`、macOS 用 `IP_BOUND_IF`，讓通知從隧道送出。 |
+
+entry node 只從 WireGuard 已驗證、解密的對端封包接受告別，exit node 則在自己開始發送告別前攔下符合格式的封包。
+這兩道檢查在 Linux 與 macOS 都生效，避免任一端 LAN 主機在 exit node 正常運作時偽造告別；其他封包原樣、依序通過。
+OS 與核心防火牆看不到告別通知，所以不必為這則通知新增放行規則；WireGuard 外層的 `listen_port` 仍須允許連入。
 
 ### 程式怎麼判斷存活
 
 你看到的「連上」同時需要近期收包與成功 handshake，單靠重試封包不算。
 
 每 2 秒取樣一次；收包計數要有變化，最後收包距今不超過 `dead_peer_timeout_sec`，handshake 距今小於 200 秒。
-兩端固定設 15 秒 keepalive；已存活的對端靜默 18 秒後開始送 probe，並在後續迴圈持續探測。
-判死後，需要比判死時間更新的 handshake 才恢復；預設逾時為 45 秒，合法最小值為 40 秒。
+兩端固定設 15 秒 keepalive；閒置 ping-pong 在已存活的對端靜默 18 秒後開始送 probe，並在後續迴圈持續探測。
+告別或逾時判死後，都需要比判死時間更新的 handshake 才恢復。
+
+### 有資料卻沒回覆時怎麼加快
+
+只有 entry node 追蹤未回覆資料，exit node 保留原本的存活迴圈。
+
+一個 keepalive 訊息是 32 bytes；每個 tick 最多容納兩個，所以 `tx_bytes` 增量超過 64 bytes 才視為資料 tick，並扣掉本程式 probe 的傳送量。
+從最後一次收包後的首個資料 tick 計時，任何收包變化都會重置；未回覆滿 `PeerReplyWithin + TickInterval`（12 秒）就送 probe，即使原本流量已停止也繼續探測。
+`FastDeadAfter` 留兩段 10 秒回覆時間、兩個 2 秒 tick 與 1 秒往返餘量，共 25 秒，可容忍一次遺失的回覆；只有 keepalive 或自身閒置 probe 不會觸發快速判死。
 
 ### 兩端會怎麼重試
 
@@ -206,7 +256,7 @@ entry node --send to 10.78.0.20--> exit node --map to 192.168.1.20--> LAN host
 
 | 條件 | 你要檢查的事 |
 |---|---|
-| alias 配對 | server `exit_lan_alias_cidr` 等於 client `lan_alias.alias_cidr`；預設都是 `10.78.0.0/16`。 |
+| alias 配對 | entry node `exit_lan_alias_cidr` 等於 exit node `lan_alias.alias_cidr`；預設都是 `10.78.0.0/16`。 |
 | alias 容量 | alias 網段不能小於 LAN；實際映射範圍從 alias 的起點開始，採 LAN 的前綴長度。 |
 | 避免衝突 | alias 不可與 `tunnel_cidr` 重疊；啟動也會檢查 tunnel／alias 和本機網段是否衝突，Linux 另查 main table 非預設路由。 |
 
@@ -237,7 +287,7 @@ exit node 沒有 `block_ipv6` 欄位；entry node 的 DNS 設定不會自動改�
 running --receive SIGINT / SIGTERM / SIGHUP--> restore routes and rules --succeed--> remove state file
 ```
 
-`Ctrl-C` 送出 SIGINT；SIGHUP 也走完整清理，SIGPIPE 則忽略，避免 log pipe 關閉時打斷清理。
+`Ctrl-C` 送出 SIGINT；關閉 SSH 或終端機會送 SIGHUP，程式會清理並停止，SIGPIPE 則忽略，避免 log pipe 關閉時打斷清理。
 TUN 介面會隨正常關閉移除；若清理失敗，程式記錄 `cleanup incomplete; state file kept for the next start`。
 
 ### `/var/run` 內的檔案做什麼
@@ -275,7 +325,7 @@ macOS 若舊 utun 已消失或不再屬於本程式，會保留無法確認歸�
 | `--client` | `false` | 跑 exit node；讀取 `reverse-vpn-tunnel.client.jsonc`，缺少時只建立範本並退出。 |
 | `--api-key KEY` | 空字串 | 只可與 `--server` 使用；至少 20 bytes，首次建立設定時採用，已有設定則比對是否相同。 |
 | `--debug` | `false` | 額外記錄唯讀系統命令、它們的失敗與 debug 訊息；不改變網路策略。 |
-| `--help` | 不啟動 | 顯示用法與旗標；這是標準 flag 套件處理的說明入口。 |
+| `--help` | — | 顯示用法與旗標，不啟動隧道；這是標準 flag 套件處理的說明入口。 |
 
 同時選兩個角色、不選角色或多加位置參數會報 `use exactly one of --server or --client`；沒有設定檔路徑參數。
 `--api-key` 會出現在程序列表與 shell history；建立設定後省略它即可。
@@ -345,7 +395,7 @@ DNS 每次重新連線都會再查詢，只取第一筆 IPv4 結果，查詢時�
 
 | 系統與角色 | 使用工具 | 實際變更 |
 |---|---|---|
-| Linux 兩端 | `ip` | 建立 `rvt0` 的 IPv4 位址與路由；同名介面不是多實例命名機制。 |
+| Linux 兩端 | `ip` | 建立 `rvt0` 的 IPv4 位址與路由；固定用 `rvt0`，所以同一台 Linux 不能同時跑兩個實例。 |
 | Linux entry node | `ip`、`sysctl` | table `21078` 放隧道預設路由；policy rules 優先序 `5250`、`5251`、`5252`，protocol `86`，fwmark `0x5256` 讓外層 UDP 保留本地路由；`iif lo` 只選本機產生的流量，main table 更明確的路由優先。 |
 | Linux entry node | `sysctl` | `net.ipv4.conf.all.src_valid_mark=1`；將 `all` 與非 lo 介面的嚴格 `rp_filter=1` 改為 `2`，記錄原值供還原。 |
 | Linux entry node | `ip -6` | 需要時在 table `21078` 放 `unreachable default` 與同組 policy rules；撤回全流量設定時移除。 |
@@ -376,6 +426,73 @@ Linux 還原 `net.ipv4.ip_forward=0` 時會提醒：若 Docker 在 exit node 執
 `dist/` 與 `.tmp/` 都在 `.gitignore`；這是避免誤提交的規則，並非保護設定檔秘密的存取控制。
 Makefile 沒有跨平台目標；把 binary 搬到其他機器前，確認作業系統與 CPU 架構相符。
 
+<a id="release"></a>
+
+## 怎麼發布或重發同一個版本
+
+你推送 `v*` tag 後，GitHub Actions 會先檢查程式，再產生可下載的 release 檔案。
+
+```text
+tag --trigger--> vet and test --build--> archives --replace--> release
+```
+
+測試與建置分成兩個 Ubuntu job，建置使用測試過的 commit；同一 tag 的流程依序執行，不會同時發布。
+流程先依 `tag_name` 列出既有 release，包含 draft；刪除符合 tag 的 release 與舊 assets，保留 tag，再建立標題為 tag、附自動產生說明的新 release。
+
+### 第一個版本怎麼切
+
+你先確認要發布的 commit 已通過測試，再從那個 commit 建立 `v0.1.0` tag。
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+workflow 在 `.github/workflows/release.yml`，預設只有 `contents: read`；測試 checkout 不保留憑證，只有 release job 取得 `contents: write`，並用 `GITHUB_TOKEN` 呼叫 `gh` 發布。
+你也可以用 `workflow_dispatch` 的 `tag` 輸入重跑既有版本；它讀取你指定的 tag。
+
+### 同一個 tag 怎麼換成新 commit
+
+你要保留版本名稱但替換內容時，先刪遠端與本地 tag，再把它指到要發布的 commit 並重推。
+
+```sh
+git push origin :refs/tags/v0.1.0
+git tag -d v0.1.0
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+先切到目標 commit 再執行；重推後會替換原 release，原 assets 不會保留。
+同一 commit 只要重跑 workflow 即可，不必移動 tag；tag 名稱以 `v` 開頭且不含斜線。
+
+### 下載哪個檔案
+
+你依機器的 OS 與 CPU 架構選檔案，解開後會得到保留執行權限的 `reverse-vpn-tunnel`。
+
+| 平台 | Asset 名稱 |
+|---|---|
+| Linux amd64 | `reverse-vpn-tunnel_<tag>_<shorthash>_linux_amd64.tar.gz` |
+| macOS arm64 | `reverse-vpn-tunnel_<tag>_<shorthash>_darwin_arm64.tar.gz` |
+| SHA-256 檢查碼 | `reverse-vpn-tunnel_<tag>_<shorthash>_checksums.txt`，包含上述兩個壓縮檔的雜湊。 |
+
+`<shorthash>` 是 tag 所指 commit 的前 7 個字元；只提供這兩種平台，打包前使用 `CGO_ENABLED=0`、`-trimpath`、`-ldflags="-s -w"` 建置。
+把你選的壓縮檔與同版本 checksums 檔放進同一個空目錄；檢查碼使用檔名，不含目錄前綴。
+
+### 只下載 Linux 壓縮檔時怎麼驗證
+
+你只挑 Linux 那一行檢查，就不會因為缺少另一平台檔案而失敗。
+
+```sh
+grep '_linux_amd64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | sha256sum -c
+```
+
+### 只下載 macOS 壓縮檔時怎麼驗證
+
+你只挑 macOS 那一行檢查，就不會因為缺少另一平台檔案而失敗。
+
+```sh
+grep '_darwin_arm64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | shasum -a 256 -c
+```
+
 <a id="e2e"></a>
 
 ## 怎麼驗證真實 Linux 網路行為
@@ -383,7 +500,7 @@ Makefile 沒有跨平台目標；把 binary 搬到其他機器前，確認作業
 你用 Docker e2e 在容器裡驗證路由、轉送與清理，避免直接修改主機的隧道設定。
 
 ```text
-build binary --build image--> start six containers --run checks--> save logs --remove containers-->
+build binary --build image--> start six containers --run checks--> save logs --finish--> remove containers
 ```
 
 它需要 Linux 主機、Go、Bash、可操作的 Docker daemon 與 Docker Compose，還需要 privileged 容器、TUN 和 macvlan 網路支援。
@@ -399,7 +516,7 @@ bash test/e2e/run.sh
 ```
 
 測試使用 Compose project `rvt-e2e`，執行前後會移除該 project 的容器與 volumes；不要和另一份同名測試同時跑。
-它檢查出口位址、重複內網的 alias、idle／probe、兩種存檔方式的即時更新、遺失 jump 的修復、暫停後 fail-open，以及 SIGTERM／SIGHUP 清理。
+它檢查出口位址、重複內網的 alias、idle／probe、兩種存檔方式的即時更新、遺失 jump 的修復、預設拒絕 INPUT 下的正常停止 goodbye 與 6 秒內恢復、持續送流量斷線後 38 秒內恢復，以及 SIGTERM／SIGHUP 清理。
 它不測 macOS；內部網路使用 `10.201.1.0/24`、`10.201.2.0/24`、`10.201.3.0/24`、`192.168.77.0/24`，請避免和現有 Docker 網路衝突。
 
 <a id="security"></a>
@@ -409,25 +526,43 @@ bash test/e2e/run.sh
 你把金鑰交給對端時，也交出了推導雙方私鑰的能力，所以只和你信任的機器配對。
 
 - `api_key` 經 Argon2id（密碼推導）與 HKDF-SHA256（金鑰展開）產生兩端私鑰與預共享金鑰；它不是登入帳號，也沒有每個使用者獨立的權限。
-- 系統命令不攜帶金鑰，WireGuard 設定 log 會遮蔽 private key 與 preshared key；首次產生的 `api_key` 仍會印出，請保護終端與 log，並保留設定檔的 `0600` 權限。
+- 系統命令不攜帶金鑰，WireGuard 設定 log 會遮蔽 private key 與 preshared key；首次產生的 `api_key` 仍會印出，請保護終端與 log；自己建立的設定檔要執行 `chmod 600 reverse-vpn-tunnel.*.jsonc`，載入時不會自動修正權限。
 - fail-open 會恢復本地上網；IPv6 阻擋失敗只記錄警告，程式也不自動更換 DNS。不要把它當作斷線封網或完整隱私隔離機制。
 
 <a id="limitations"></a>
 
 ## 遇到問題時先查什麼
 
-你先對照程式明確支援的範圍，再決定要改設定還是檢查主機網路。
+你依症狀找下一個檢查點，不必一次猜測所有網路設定。
 
-| 狀況或限制 | 你要知道的事 |
+### 連線一直建立不起來
+
+你先確認位址與固定資源，排除不支援的連線方式。
+
+| 症狀 | 先查什麼 |
 |---|---|
-| 只支援一組 peer | 沒有多 exit node、使用者清單或控制 API；兩端共享一把 `api_key`。 |
-| 網路只處理 IPv4 隧道 | exit node 只解析 A 記錄；IPv6 用阻擋處理，不會轉送進 IPv4 隧道。 |
-| 只轉送 entry node 的主機流量 | Linux 用 `iif lo`，不會自動替其他 LAN 機器或 Docker 的轉送流量改出口；macOS 使用主機路由，沒有同一套 Linux 選流規則。 |
-| 本地路由仍有優先順序 | Linux main table 非預設路由、macOS 比 `/1` 更明確的路由仍可走本地；「全流量」不是覆蓋每條路由的保證。 |
-| 名稱或編號衝突 | Linux 固定 `rvt0`、table `21078`、protocol `86`；macOS 固定 PF anchor 名稱。角色鎖不協調其他 VPN 的資源。 |
-| LAN 偵測失敗 | `auto` 不找多個內網；手動設 private IPv4 `/16`–`/30`，或停用 alias。 |
-| 防火牆規則修復有限 | 定期檢查 jump／NAT 是否存在，不會完整稽核其他防火牆軟體或每一條規則。 |
-| 當機後網路未恢復 | 檢查 state file 與錯誤列出的清理命令；macOS 舊 utun 消失後，IPv6 reject 路由可能要手動刪除。 |
-| 沒有背景服務安裝流程 | 程式以前景程序執行，沒有內建 service manager 設定；SIGHUP 會停止並清理。 |
+| 想接第二個 exit node 或加入其他使用者 | 這裡只支援一組 peer，共享一把 `api_key`；沒有多 exit node、使用者清單或控制 API。 |
+| 用 IPv6 位址連不上 | exit node 只解析 A 記錄；隧道只轉送 IPv4，IPv6 用阻擋處理。 |
+| 介面、table 或規則衝突 | Linux 固定 `rvt0`、table `21078`、protocol `86`，macOS 固定 PF anchor 名稱；角色鎖不協調其他 VPN 的資源。 |
+
+### 出口或內網位址和預期不同
+
+你先分清楚本機流量與更明確的本地路由，再查 alias 網段。
+
+| 症狀 | 先查什麼 |
+|---|---|
+| 其他 LAN 機器或 Docker 流量沒有改出口 | Linux 的 `iif lo` 只選 entry node 本機產生的流量；macOS 用主機路由，沒有相同的 Linux 選流規則。 |
+| 少數目的地仍走本地 | Linux main table 非預設路由、macOS 比 `/1` 更明確的路由仍優先；全流量轉送不保證覆蓋每條路由。 |
+| LAN 偵測失敗 | `auto` 不搜尋多個內網；明確設定 private IPv4 `/16`–`/30`，或停用 alias。 |
+
+### 執行一陣子後停止或網路未恢復
+
+你先查程序與清理訊息，再檢查防火牆是否移除了專用規則。
+
+| 症狀 | 先查什麼 |
+|---|---|
+| 防火牆重載後不通 | 定期修復只檢查 jump／NAT 是否存在，不會完整稽核其他防火牆軟體或每條規則。 |
+| 當機後網路未恢復 | 看 state file 與錯誤列出的清理命令；macOS 舊 utun 消失後，IPv6 reject 路由可能要手動刪除。 |
+| SSH 斷開後隧道停止 | 關掉 SSH 或終端機會送 SIGHUP 並停止、清理；要長時間執行請用 `tmux` 或自備 service 設定，程式沒有內建安裝流程。 |
 
 回到[中文 README](../README.md)可重跑最小流程；repository 目前沒有 `LICENSE`，尚未聲明授權條款。

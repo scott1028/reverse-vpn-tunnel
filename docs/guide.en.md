@@ -19,7 +19,8 @@ Use this table to read configs, commands, and logs without first learning the VP
 | DNS / A record | DNS looks up addresses by name; an A record supplies an IPv4 address. |
 | root / sudo | Root is the system administrator identity; sudo lets you run a command with that identity. |
 | dead peer timeout | How long the program can go without receiving a packet before declaring the peer dead; configured as `dead_peer_timeout_sec`. |
-| fail-open | The entry node returns to local routing when the peer dies, keeping internet access available; it does not block internet access on disconnect. |
+| Declaring a peer dead | Treating the other node as disconnected. |
+| fail-open | The entry node restores local routing only after declaring the peer dead; traffic is stuck in the tunnel until then, and disconnecting does not block internet access afterward. |
 | state file | A file recording original system values and recovery information, so the next start can handle changes left by a crash. |
 | lock file | A separate lock for each role; you cannot run two instances of the same role on one machine. |
 | CIDR | An address plus a bit count after a slash describing a network; `/24` has 256 addresses, and fewer prefix bits mean a larger network. |
@@ -35,8 +36,14 @@ Use this table to read configs, commands, and logs without first learning the VP
 | handshake / keepalive / probe | A handshake establishes an encrypted session; keepalive maintains the connection; a probe is an ICMP echo packet sent by the program. |
 | socket | The operating system endpoint a program uses to send and receive network packets. |
 | mtime / stderr | mtime is a file's last modification time; stderr is a process's standard error output, shown in the terminal by default. |
+| SIGINT / SIGTERM / SIGHUP | Stop signals: `Ctrl-C` sends SIGINT, and closing SSH or the terminal sends SIGHUP; this program cleans up and stops on receipt. |
+| SIGKILL | A forced stop that cannot be caught, leaving the program no chance to clean up. |
+| tmux / service | tmux keeps a terminal session alive; a service is a background process managed by the system for long runs. |
+| tick / ControlPort | A tick is one loop check; ControlPort is the inner UDP destination port for goodbyes; the entry node does not bind it. |
+| GitHub Actions / workflow / job | GitHub Actions runs an automated workflow; a job is a group of its steps running on a runner machine. |
+| tag / release / asset / draft | A tag marks a Git commit; a release is a GitHub version page, an asset is a download, and a draft is an unpublished release. |
+| checksum / SHA-256 | A checksum checks a file; here SHA-256 hashes let you compare downloaded content for equality. |
 | e2e / API | e2e means end-to-end testing, here using real Linux networking; an API is an interface other programs can call. |
-
 
 <a id="requirements"></a>
 
@@ -48,7 +55,7 @@ Check the system tools and network access first, so missing tools do not interru
 |---|---|
 | OS | Linux or macOS; these are the only system networking implementations, and no minimum OS version is declared. |
 | Permissions | Root or sudo on both nodes; an ordinary user gets `must run as root (sudo)`. |
-| Build | Go 1.26.8 and make; building fetches the dependencies in `go.mod`. |
+| Build | Go 1.26.8 or later and make; building fetches the dependencies in `go.mod`. |
 | Linux tools | `ip`, `iptables`, `sysctl`, and a usable TUN device; LAN alias also needs iptables NETMAP support. |
 | macOS tools | `ifconfig`, `route`, `pfctl`, and `sysctl`; the exit node's main PF rules need the anchor hooks described below. |
 | entry node network | A reachable inbound IPv4 UDP port, `51820` by default; allow it through the router and firewall. |
@@ -65,10 +72,10 @@ You need a reachable entry node address; the program has no intermediary service
 Start the entry node and get its key first, then let the exit node dial in with that key.
 
 ```text
-Time -------------------------------------------------------------------->
-you        | start entry | copy key and address | fill exit config | rerun exit
-entry node | create config and listen          | accept <-----------------+
-exit node  |                                   | create template  | dial -+
+Time ----------------------------------------------------------------------------------------------->
+you        | start entry   | run exit once    | copy key/address   | fill exit config   | rerun exit
+entry node | listen        |                  | share key/address  |                    | accept <--+
+exit node  |               | write template   |                    |                    | dial -----+
 ```
 
 `--server` keeps running; `--client` exits successfully on the run that creates its template.
@@ -76,7 +83,7 @@ Start the commands below from the repository root; keep each machine's own confi
 
 ### Create the entry node config
 
-Build and start on the entry node; the program looks for the server config in its current directory.
+Build and start on the entry node; the program looks for the entry node config in its current directory.
 
 ```sh
 make release
@@ -107,7 +114,7 @@ The template enables LAN alias; adjust the [LAN settings](#lan-alias) first if `
 On later starts, you use the config in the current directory; the program does not overwrite existing files.
 
 New files use permissions `0600`; when run through sudo, the program uses `SUDO_UID` and `SUDO_GID` to give the config back to the original user.
-If you still pass `--api-key`, it must match the server file; a mismatch exits with a request to edit the file.
+If you still pass `--api-key`, it must match the entry node config file; a mismatch exits with a request to edit the file.
 Omitted fields keep their defaults; unknown fields, invalid syntax, or values outside the valid ranges stop startup.
 
 <a id="daily-use"></a>
@@ -124,6 +131,12 @@ Start from the config directory, then check the logs and the entry node's actual
 | exit node | `connected to server` | The entry node is confirmed alive. |
 | entry node | `forwarding all traffic through the exit node` | Full traffic routing has been applied. |
 | entry node | `local routing restored` | Full traffic routing was rolled back; base tunnel routes remain. |
+| entry node | `peer dead; restoring local routing` | The peer is declared dead, and local routing restoration starts. |
+| exit node | `server dead; redialing later` | The entry node is declared dead; a retry comes later. |
+| exit node | `redialing server` | A reconnect attempt is starting. |
+| entry node | `exit node said goodbye` | A goodbye changed the peer from alive to dead; `peer dead; restoring local routing` reports restoration next. |
+| entry node | `config reloaded` | Reading succeeded, and the two live fields have been loaded. |
+| entry node | `config changes other than forward_all_traffic / block_ipv6 need a restart` | Other fields changed and need a restart to apply. |
 
 Run `curl -4 https://ifconfig.me` on the entry node; with a healthy connection and `forward_all_traffic: true`, you should see the exit node network's public IPv4 address.
 Add `--debug` to see read-only system commands and their failures; commands that change the system are already logged, logs go to stderr, and the program does not create its own log file.
@@ -136,11 +149,11 @@ You can change only two entry node fields live; stop and restart the program for
 
 | Config change | How it applies |
 |---|---|
-| server `forward_all_traffic` | Applies on save; `false` restores local routing while keeping the tunnel and LAN alias route. |
-| server `block_ipv6` | Applies on save; IPv6 blocking operates only while full traffic routing is active. |
-| Other server fields, including `reconnect` | Need a restart; even when edited together, only the two fields above apply live. |
-| All client fields | Need a restart; the exit node has no config watcher. |
-| Invalid or unreadable new server config | Keeps the previous settings and logs `config not applied; keeping previous settings`. |
+| entry node `forward_all_traffic` | Applies on save; `false` restores local routing while keeping the tunnel and LAN alias route. |
+| entry node `block_ipv6` | Applies on save; IPv6 blocking operates only while full traffic routing is active. |
+| Other entry node fields, including `reconnect` | Need a restart; even when edited together, only the two fields above apply live. |
+| All exit node fields | Need a restart; the exit node has no config watcher. |
+| Invalid or unreadable new entry node config | Keeps the previous settings and logs `config not applied; keeping previous settings`. |
 
 The watcher compares mtime and size on each 2-second loop and reads after two identical polls; it handles both in-place writes and save-by-rename.
 Edits that preserve both mtime and size may go unnoticed; after a failed read, save again to retry, and remember that `SIGHUP` stops the program rather than reloading it.
@@ -149,22 +162,59 @@ Edits that preserve both mtime and size may go unnoticed; after a failed read, s
 
 ## Recover when the peer stops answering
 
-You do not need to repair the default route after disconnecting; the entry node rolls back full traffic routing and uses the local exit.
+If the peer disappears during full traffic forwarding, the entry node's traffic is stuck in the tunnel until the peer is declared dead and local routing is restored.
 
 ```text
-Time -------------------------------------------------------------------->
-[alive] --stop receiving--> [dead: use local route] --fresh handshake--> [alive]
+Time -------------------------------------------------------------------------------->
+[forwarding] --lose replies--> [traffic stuck] --declare peer dead--> [local routing]
 ```
 
-This is fail-open; existing internet connections may break during the switch, and traffic is not restricted to the tunnel afterward.
+Before the first connection, routing stays local; the waits below apply to a connection that was already forwarding.
+This is fail-open: traffic is not restricted to the tunnel afterward, and existing connections may break during the switch.
+
+### Know how long you will wait
+
+Estimate the wait by how the exit node leaves; all three cases restore local routing only after the peer is declared dead.
+
+| Situation | When death is detected and routing returns |
+|---|---|
+| Clean exit node stop | A received goodbye restores routing in the same loop, about 1 tick (2 seconds). |
+| Crash or link loss while the entry node sends data | About `FastDeadAfter` (25 seconds) from the first unanswered data tick, restored when the next sample confirms it. |
+| Fully idle | Keeps the existing ping-pong: probe after 18 seconds of silence, then declare dead after `dead_peer_timeout_sec`, default 45 seconds, minimum 40 seconds. |
+
+A tick is a check every 2 seconds; these are approximate times, also affected by sampling and system command duration.
+If goodbye cannot arrive, unanswered traffic or the idle timeout detects death instead; a failed goodbye send does not block cleanup.
+
+### Understand the clean stop notification
+
+You do not open another external port; the goodbye travels only inside the encrypted tunnel.
+
+| Item | Actual behavior |
+|---|---|
+| Control channel | The entry node recognizes goodbyes after WireGuard decrypts packets, before writing to TUN; `ControlPort` (`51821`) is only the inner UDP destination port, with no local listener or port reservation. |
+| Message and source | The IPv4 UDP payload must be exactly `rvt-bye-1`, from the exit node's tunnel address (default `10.77.0.2`) to the entry node's tunnel address (default `10.77.0.1`) and the destination port above; a match signals the loop and consumes the packet. |
+| Sending guard | The exit node drops goodbye-shaped packets when reading TUN; it allows them only after starting its own goodbye, and keeps that permission for the rest of the run. |
+| Sending and cleanup | After SIGINT / SIGTERM / SIGHUP, the exit node sends 3 times about 100 ms apart before closing the tunnel; the whole budget is 400 ms, below 500 ms, and failure only logs a warning; the sending socket uses Linux `SO_BINDTODEVICE` or macOS `IP_BOUND_IF` to send through the tunnel. |
+
+The entry node accepts goodbyes only from packets WireGuard has authenticated and decrypted from the peer; the exit node blocks goodbye-shaped packets until it starts its own goodbye.
+Both checks apply on Linux and macOS, preventing hosts on either LAN from forging a goodbye while the exit node runs normally; other packets pass unchanged and in order.
+The OS and kernel firewall never see the goodbye, so it needs no extra allow rule; WireGuard's outer `listen_port` still needs inbound access.
 
 ### Understand how liveness is checked
 
 The program requires both recent packets and a successful handshake before calling a peer connected; retry packets alone do not count.
 
 It samples every 2 seconds; receive counters must have changed, the last receive must be no older than `dead_peer_timeout_sec`, and the handshake must be less than 200 seconds old.
-Both nodes set a fixed 15-second keepalive; an already live peer that is silent for 18 seconds gets a probe, with probes continuing on later loops.
-After being declared dead, the peer needs a handshake newer than that death time to recover; the timeout defaults to 45 seconds and cannot be below 40 seconds.
+Both nodes set a fixed 15-second keepalive; the idle ping-pong probes an already live peer after 18 seconds of silence and keeps probing on later loops.
+After goodbye or a timeout declares death, recovery requires a handshake newer than that death time.
+
+### Detect unanswered data sooner
+
+Only the entry node tracks unanswered data; the exit node keeps its existing liveness loop.
+
+A keepalive message is 32 bytes, with at most two per tick, so a `tx_bytes` increase above 64 bytes counts as a data tick, excluding the program's own probe traffic.
+Timing starts at the first data tick since the last received packet, and any receive change resets it; after `PeerReplyWithin + TickInterval` (12 seconds) without an answer, probes continue even if the original traffic stops.
+`FastDeadAfter` allows two 10-second reply windows, two 2-second ticks, and 1 second for the round trip: 25 seconds, tolerating one lost reply; keepalives or the program's own idle probes alone do not trigger fast death.
 
 ### Understand what each node retries
 
@@ -206,7 +256,7 @@ When changing networks, update both nodes so packets have a matching destination
 
 | Condition | What you need to check |
 |---|---|
-| Matching aliases | server `exit_lan_alias_cidr` equals client `lan_alias.alias_cidr`; both default to `10.78.0.0/16`. |
+| Matching aliases | entry node `exit_lan_alias_cidr` equals exit node `lan_alias.alias_cidr`; both default to `10.78.0.0/16`. |
 | Alias capacity | The alias network cannot be smaller than the LAN; the actual mapped range starts at the alias base and uses the LAN prefix length. |
 | Avoiding overlaps | Alias cannot overlap `tunnel_cidr`; startup also checks tunnel and alias against local interface networks, plus non-default main table routes on Linux. |
 
@@ -237,7 +287,7 @@ Send a normal stop signal so the program undoes network changes; it deletes the 
 running --receive SIGINT / SIGTERM / SIGHUP--> restore routes and rules --succeed--> remove state file
 ```
 
-`Ctrl-C` sends SIGINT; SIGHUP also runs full cleanup, while SIGPIPE is ignored so a closed log pipe does not interrupt cleanup.
+`Ctrl-C` sends SIGINT; closing SSH or the terminal sends SIGHUP, which cleans up and stops the program, while SIGPIPE is ignored so a closed log pipe does not interrupt cleanup.
 Normal close removes the TUN interface; failed cleanup logs `cleanup incomplete; state file kept for the next start`.
 
 ### Understand the files under `/var/run`
@@ -275,7 +325,7 @@ Choose exactly one role per run; flags control startup, and config paths are fix
 | `--client` | `false` | Runs the exit node; reads `reverse-vpn-tunnel.client.jsonc`, creating only a template and exiting if it is missing. |
 | `--api-key KEY` | Empty string | Valid only with `--server`; at least 20 bytes, used to create a new config or compared against an existing file. |
 | `--debug` | `false` | Adds read-only system commands, their failures, and debug messages to logs; it does not change network policy. |
-| `--help` | Does not start | Shows usage and flags; this help entry is handled by the standard flag package. |
+| `--help` | — | Shows usage and flags without starting a tunnel; this help entry is handled by the standard flag package. |
 
 Both roles, neither role, or extra positional arguments produce `use exactly one of --server or --client`; there is no config-path flag.
 `--api-key` appears in process listings and shell history; omit it once the config is created.
@@ -345,7 +395,7 @@ Use this table to check what the program touches, especially if your host alread
 
 | System and role | Tools | Actual changes |
 |---|---|---|
-| Linux, both nodes | `ip` | Configures the IPv4 address and routes for `rvt0`; the fixed interface name does not support multiple instances. |
+| Linux, both nodes | `ip` | Configures the IPv4 address and routes for `rvt0`; Linux always uses `rvt0`, so you cannot run two instances on the same machine. |
 | Linux entry node | `ip`, `sysctl` | Places the tunnel default route in table `21078`; policy priorities `5250`, `5251`, `5252`, protocol `86`, and fwmark `0x5256` keep outer UDP on local routes; `iif lo` selects only locally generated traffic, with more specific main table routes first. |
 | Linux entry node | `sysctl` | Sets `net.ipv4.conf.all.src_valid_mark=1`; changes strict `rp_filter=1` to `2` for `all` and non-lo interfaces, recording originals for restoration. |
 | Linux entry node | `ip -6` | Adds `unreachable default` in table `21078` and the matching policy rules when needed, removing them on full traffic rollback. |
@@ -376,6 +426,73 @@ Use the Makefile to build for your current host platform; release and debug bina
 Both `dist/` and `.tmp/` are in `.gitignore`; this helps prevent accidental commits and does not provide access control for secrets.
 There is no cross-platform Makefile target; before copying a binary to another machine, check that its OS and CPU architecture match.
 
+<a id="release"></a>
+
+## Publish or replace a release
+
+Push a `v*` tag to have GitHub Actions check the code and create downloadable release assets.
+
+```text
+tag --trigger--> vet and test --build--> archives --replace--> release
+```
+
+Testing and building use two Ubuntu jobs, with builds pinned to the tested commit; runs for the same tag are serialized rather than publishing together.
+The workflow lists existing releases by `tag_name`, including drafts, deletes releases and old assets matching that tag while keeping the tag, then creates a new release titled with the tag and generated notes.
+
+### Cut the first version
+
+Choose a commit that passed tests, then create the `v0.1.0` tag from that commit.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The workflow is `.github/workflows/release.yml`, defaults to `contents: read`, and does not persist the test checkout's credentials; only the release job gets `contents: write`, using `GITHUB_TOKEN` with `gh` to publish.
+You can also rerun an existing version through the `workflow_dispatch` `tag` input, which reads the tag you specify.
+
+### Move the same tag to a new commit
+
+To keep the version name while replacing its content, delete the remote and local tag, point it at your target commit, and push it again.
+
+```sh
+git push origin :refs/tags/v0.1.0
+git tag -d v0.1.0
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Switch to the target commit first; pushing again replaces the old release and does not keep its old assets.
+For the same commit, rerun the workflow without moving the tag; tag names start with `v` and contain no slash.
+
+### Choose a download
+
+Choose by your machine's OS and CPU architecture; extracting the archive gives you `reverse-vpn-tunnel` with its executable permissions preserved.
+
+| Platform | Asset name |
+|---|---|
+| Linux amd64 | `reverse-vpn-tunnel_<tag>_<shorthash>_linux_amd64.tar.gz` |
+| macOS arm64 | `reverse-vpn-tunnel_<tag>_<shorthash>_darwin_arm64.tar.gz` |
+| SHA-256 checksums | `reverse-vpn-tunnel_<tag>_<shorthash>_checksums.txt`, containing hashes for both archives. |
+
+`<shorthash>` is the first 7 characters of the tagged commit; only these two platforms are provided, built with `CGO_ENABLED=0`, `-trimpath`, and `-ldflags="-s -w"` before packing.
+Put your chosen archive and the matching version's checksums file in one empty directory; checksum entries use bare file names without directory prefixes.
+
+### Verify only the Linux archive you downloaded
+
+Select only the Linux checksum line so a missing archive for the other platform does not fail verification.
+
+```sh
+grep '_linux_amd64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | sha256sum -c
+```
+
+### Verify only the macOS archive you downloaded
+
+Select only the macOS checksum line so a missing archive for the other platform does not fail verification.
+
+```sh
+grep '_darwin_arm64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | shasum -a 256 -c
+```
+
 <a id="e2e"></a>
 
 ## Test real Linux networking behavior
@@ -383,7 +500,7 @@ There is no cross-platform Makefile target; before copying a binary to another m
 Use Docker e2e to check routing, forwarding, and cleanup inside containers, keeping tunnel setup changes off the host.
 
 ```text
-build binary --build image--> start six containers --run checks--> save logs --remove containers-->
+build binary --build image--> start six containers --run checks--> save logs --finish--> remove containers
 ```
 
 It needs a Linux host, Go, Bash, Docker daemon access, and Docker Compose, plus privileged containers, TUN, and macvlan network support.
@@ -399,7 +516,7 @@ bash test/e2e/run.sh
 ```
 
 The test uses Compose project `rvt-e2e` and removes its containers and volumes before and after the run; do not run another test with that project name at the same time.
-It checks exit addresses, alias access with overlapping LANs, idle and probes, live updates through two save methods, missing-jump repair, fail-open after pausing, and SIGTERM / SIGHUP cleanup.
+It checks exit addresses, alias access with overlapping LANs, idle and probes, live updates through two save methods, missing-jump repair, clean-stop goodbye and restoration within 6 seconds under default-deny INPUT, restoration within 38 seconds of link loss with ongoing traffic, and SIGTERM / SIGHUP cleanup.
 It does not test macOS; internal networks use `10.201.1.0/24`, `10.201.2.0/24`, `10.201.3.0/24`, and `192.168.77.0/24`, so avoid conflicts with existing Docker networks.
 
 <a id="security"></a>
@@ -409,25 +526,43 @@ It does not test macOS; internal networks use `10.201.1.0/24`, `10.201.2.0/24`, 
 Sharing the key also shares the ability to derive both private keys, so pair only with a machine you trust.
 
 - `api_key` goes through Argon2id (password derivation) and HKDF-SHA256 (key expansion) to produce both private keys and a preshared key; it is not an account, and there are no separate per-user permissions.
-- System commands carry no keys, and WireGuard config logs redact private and preshared keys; the first generated `api_key` is still printed, so protect your terminal and logs and keep config permissions at `0600`.
+- System commands carry no keys, and WireGuard config logs redact private and preshared keys; the first generated `api_key` is still printed, so protect your terminal and logs; run `chmod 600 reverse-vpn-tunnel.*.jsonc` for configs you create yourself, since loading does not fix permissions.
 - Fail-open restores local internet access; failed IPv6 blocking only logs a warning, and DNS does not change automatically. This is not an internet block on disconnect or complete privacy isolation.
 
 <a id="limitations"></a>
 
-## Check these limits when something goes wrong
+## Check the next step when something goes wrong
 
-Compare your setup with the program's actual supported scope before deciding whether to edit config or inspect host networking.
+Use the symptom to choose your next check instead of guessing at every network setting at once.
 
-| Situation or limit | What you need to know |
+### The connection never comes up
+
+Check addresses and fixed resources first to rule out unsupported connection setups.
+
+| Symptom | What to check first |
 |---|---|
-| Only one peer pair | There are no multiple exit nodes, user lists, or control API; both nodes share one `api_key`. |
-| The tunnel handles IPv4 only | The exit node resolves only A records; IPv6 is handled by blocking, not by forwarding it through the IPv4 tunnel. |
-| Forwarding is for the entry node host | Linux uses `iif lo`, so it does not automatically change the exit for other LAN hosts or forwarded Docker traffic; macOS uses host routes without those Linux selection rules. |
-| Local routes still have priority | Non-default Linux main table routes and macOS routes more specific than `/1` may stay local; full traffic routing does not guarantee overriding every route. |
-| Names or numbers collide | Linux fixes `rvt0`, table `21078`, and protocol `86`; macOS fixes the PF anchor name. Role locks do not coordinate resources with other VPNs. |
+| You want another exit node or more users | Only one peer pair shares one `api_key`; there are no multiple exit nodes, user lists, or control API. |
+| An IPv6 address does not connect | The exit node resolves only A records; the tunnel forwards IPv4 only and handles IPv6 through blocking. |
+| Interfaces, tables, or rules collide | Linux fixes `rvt0`, table `21078`, and protocol `86`, while macOS fixes the PF anchor name; role locks do not coordinate resources with other VPNs. |
+
+### Exit or LAN addresses differ from what you expect
+
+Distinguish host traffic and more specific local routes first, then check the alias network.
+
+| Symptom | What to check first |
+|---|---|
+| Other LAN hosts or Docker traffic keep their exit | Linux `iif lo` selects traffic generated on the entry node itself; macOS uses host routes without those Linux selection rules. |
+| A few destinations still stay local | Non-default Linux main table routes and macOS routes more specific than `/1` still take priority; full traffic forwarding does not guarantee overriding every route. |
 | LAN detection fails | `auto` does not search multiple LANs; set private IPv4 `/16`–`/30` explicitly or disable alias. |
-| Firewall repair is limited | Periodic checks look for jumps or NAT presence rather than auditing other firewall software or every rule. |
-| Networking remains after a crash | Check the state file and printed cleanup commands; macOS IPv6 reject routes may need manual removal if the old utun disappears. |
-| No background service installer | The program runs in the foreground with no built-in service manager configuration; SIGHUP stops and cleans up. |
+
+### It stops later or networking does not recover
+
+Check the process and cleanup messages first, then whether a firewall removed the dedicated rules.
+
+| Symptom | What to check first |
+|---|---|
+| A firewall reload breaks connectivity | Periodic repair checks only for jumps or NAT presence, without auditing other firewall software or every rule. |
+| Networking remains broken after a crash | Check the state file and printed cleanup commands; macOS IPv6 reject routes may need manual removal if the old utun disappears. |
+| The tunnel stops when SSH closes | Closing SSH or the terminal sends SIGHUP, stopping and cleaning up; use `tmux` or your own service configuration for long runs, since the program has no built-in installer. |
 
 Return to the [English README](../README.en.md) to repeat the minimal setup; the repository has no `LICENSE` and does not yet declare license terms.

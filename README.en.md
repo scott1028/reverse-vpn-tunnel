@@ -11,14 +11,14 @@ entry node (--server) --send--> exit node (--client) --reach--> internet
 entry node (--server) <--dial-- exit node (--client)
 ```
 
-Both machines need root; the program changes routing and firewall settings, then restores local routing on disconnect instead of blocking internet access.
+Both machines need root; the program changes routing and firewalls, and traffic is stuck until the peer is declared dead (treated as disconnected): about 2 seconds after a clean stop, 25 seconds with unanswered traffic, or the default 45 seconds while idle.
 
-## What do you need
+## What you need
 
 - Two Linux or macOS machines, with root or sudo access.
-- Go 1.26.8 and make to build from source; [required system tools](docs/guide.en.md#requirements) depend on the OS.
-- A reachable UDP port on the entry node, `51820` by default; configure port forwarding on its router if needed.
-- Docker only for the [e2e test](docs/guide.en.md#e2e); you do not need it for normal use.
+- Go 1.26.8 or later and make to build from source; [required system tools](docs/guide.en.md#requirements) depend on the OS.
+- A reachable UDP port (UDP carries the tunnel packets) on the entry node, `51820` by default; configure port forwarding on its router if needed.
+- Docker only for the [e2e (end-to-end) test](docs/guide.en.md#e2e); you do not need it for normal use.
 
 ## Start both machines
 
@@ -33,6 +33,7 @@ sudo ./reverse-vpn-tunnel --server  # entry node; use --client on the exit node
 On first run, the entry node creates `reverse-vpn-tunnel.server.jsonc` and keeps running; without a supplied key, it generates and prints an `api_key`.
 The exit node creates `reverse-vpn-tunnel.client.jsonc` and exits; fill in the same key and the entry node's address, then run it again.
 You can also prepare the configs below first; see [first startup](docs/guide.en.md#setup) for the full steps.
+Closing SSH or the terminal sends SIGHUP and stops the tunnel; use [tmux or a service](docs/guide.en.md#cleanup) for a long run.
 
 ## Check where your traffic leaves
 
@@ -50,17 +51,16 @@ peer connected
 forwarding all traffic through the exit node
 ```
 
-
 ## Which machine runs which flag
 
-Choose roles by whose traffic needs a different exit; the role names do not tell you who dials first.
+Run `--server` on the machine that needs a different exit; it listens. Run `--client` on the machine that provides the exit; it dials.
 
 | Machine | Flag | Network need | Config file | What it does |
 |---|---|---|---|---|
 | entry node | `--server` | Reachable inbound UDP port | `reverse-vpn-tunnel.server.jsonc` | Sends this machine's internet traffic through the exit node while connected |
-| exit node | `--client` | Can dial the entry node; may sit behind NAT | `reverse-vpn-tunnel.client.jsonc` | Connects to the entry node and forwards its traffic to the internet |
+| exit node | `--client` | Can dial the entry node; may sit behind NAT (network address translation) | `reverse-vpn-tunnel.client.jsonc` | Connects to the entry node and forwards its traffic to the internet |
 
-NAT means network address translation: machines on a private network share an external address; see the [glossary](docs/guide.en.md#glossary) for other terms.
+See the [glossary](docs/guide.en.md#glossary) for other terms.
 
 ## Fill in the minimum config
 
@@ -94,9 +94,9 @@ Three things to remember:
 
 Your `api_key` derives both private keys, so treat it as a secret that controls this pair's connection.
 
-- Do not commit configs or share first-run output; generated config files have permissions `0600`.
+- Do not commit configs or share first-run output; generated files use `0600`, and for configs you create yourself, run `chmod 600 reverse-vpn-tunnel.*.jsonc`.
 - `--api-key` can appear in process listings and stays in shell history; read it from the config for normal use.
-- `block_ipv6` defaults to on, but a failed block only logs a warning; a disconnect uses your local exit, as covered in [IPv6 and limitations](docs/guide.en.md#ipv6).
+- `block_ipv6` defaults to on, but a failed block only logs a warning; local routing returns only after the peer is declared dead, as covered in [IPv6 and limitations](docs/guide.en.md#ipv6).
 
 ## Where to go next
 
@@ -104,7 +104,7 @@ The [user guide](docs/guide.en.md) separates the details you may need next.
 
 - [CLI and full config](docs/guide.en.md#flags): defaults, valid ranges, live edits, and restart rules.
 - [Connections and system changes](docs/guide.en.md#reconnect): timeouts, LAN alias, IPv6, stopping, and crash recovery.
-- [Build and test](docs/guide.en.md#build): Makefile, Docker e2e, log locations, and known limitations.
+- [Build, test, and release](docs/guide.en.md#build): Makefile, Docker e2e, log locations, and the [tag release flow](docs/guide.en.md#release).
 
 ## What license can you use
 
