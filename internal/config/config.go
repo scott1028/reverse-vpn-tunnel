@@ -2,8 +2,10 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"strconv"
@@ -38,7 +40,8 @@ type Server struct {
 	ForwardAllTraffic bool         `json:"forward_all_traffic"`
 	BlockIPv6         bool         `json:"block_ipv6"`
 	TunnelCIDR        netip.Prefix `json:"tunnel_cidr"`
-	Home2LANAliasCIDR netip.Prefix `json:"home2_lan_alias_cidr"`
+	ExitLANAliasCIDR  netip.Prefix `json:"exit_lan_alias_cidr"`
+	ExitLANAliasKey   string       `json:"-"`
 	MTU               int          `json:"mtu"`
 	Reconnect         Reconnect    `json:"reconnect"`
 }
@@ -69,7 +72,8 @@ func DefaultServer() Server {
 		ForwardAllTraffic: true,
 		BlockIPv6:         true,
 		TunnelCIDR:        netip.MustParsePrefix("10.77.0.0/30"),
-		Home2LANAliasCIDR: netip.MustParsePrefix("10.78.0.0/16"),
+		ExitLANAliasCIDR:  netip.MustParsePrefix("10.78.0.0/16"),
+		ExitLANAliasKey:   "exit_lan_alias_cidr",
 		MTU:               1280,
 		Reconnect:         defaultReconnect(),
 	}
@@ -97,9 +101,30 @@ func LoadServer(path string) (Server, error) {
 
 func loadServer(path string) (Server, fileSig, error) {
 	cfg := DefaultServer()
-	sig, err := load(path, &cfg)
+	aliasName := "exit_lan_alias_cidr"
+	wire := struct {
+		*Server
+		ExitLANAliasCIDR   json.RawMessage `json:"exit_lan_alias_cidr"`
+		LegacyLANAliasCIDR json.RawMessage `json:"home2_lan_alias_cidr"`
+	}{Server: &cfg}
+	sig, err := load(path, &wire)
+	if err == nil && len(wire.ExitLANAliasCIDR) > 0 && len(wire.LegacyLANAliasCIDR) > 0 {
+		err = errors.New("cannot set both exit_lan_alias_cidr and home2_lan_alias_cidr")
+	}
 	if err == nil {
-		err = cfg.Validate()
+		alias := wire.ExitLANAliasCIDR
+		if len(wire.LegacyLANAliasCIDR) > 0 {
+			alias = wire.LegacyLANAliasCIDR
+			aliasName = "home2_lan_alias_cidr"
+			slog.Warn("home2_lan_alias_cidr is deprecated; rename it to exit_lan_alias_cidr")
+		}
+		if len(alias) > 0 && json.Unmarshal(alias, &cfg.ExitLANAliasCIDR) != nil {
+			err = fmt.Errorf("%s must be an IPv4 network", aliasName)
+		}
+	}
+	if err == nil {
+		cfg.ExitLANAliasKey = aliasName
+		err = cfg.validate(aliasName)
 	}
 	if err != nil {
 		return Server{}, sig, fmt.Errorf("%s: %w", path, err)
@@ -121,6 +146,10 @@ func LoadClient(path string) (Client, error) {
 }
 
 func (c Server) Validate() error {
+	return c.validate("exit_lan_alias_cidr")
+}
+
+func (c Server) validate(aliasName string) error {
 	if err := validateAPIKey(c.APIKey); err != nil {
 		return err
 	}
@@ -130,7 +159,7 @@ func (c Server) Validate() error {
 	if err := validateTunnel(c.TunnelCIDR); err != nil {
 		return err
 	}
-	if err := validateAlias("home2_lan_alias_cidr", c.Home2LANAliasCIDR, c.TunnelCIDR); err != nil {
+	if err := validateAlias(aliasName, c.ExitLANAliasCIDR, c.TunnelCIDR); err != nil {
 		return err
 	}
 	if err := validateMTU(c.MTU); err != nil {

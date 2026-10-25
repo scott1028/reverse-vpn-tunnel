@@ -37,7 +37,6 @@ Use this table to read configs, commands, and logs without first learning the VP
 | mtime / stderr | mtime is a file's last modification time; stderr is a process's standard error output, shown in the terminal by default. |
 | e2e / API | e2e means end-to-end testing, here using real Linux networking; an API is an interface other programs can call. |
 
-`home2` / `Home2` in the original names `home2_lan_alias_cidr`, `Home2 LAN alias`, and `forwarding all traffic through Home2` means the exit node.
 
 <a id="requirements"></a>
 
@@ -123,7 +122,7 @@ Start from the config directory, then check the logs and the entry node's actual
 | exit node | `client started` | Forwarding rules and the interface are ready; the connection attempt comes next. |
 | entry node | `peer connected` | The peer meets the liveness conditions. |
 | exit node | `connected to server` | The entry node is confirmed alive. |
-| entry node | `forwarding all traffic through Home2` | Full traffic routing has been applied. |
+| entry node | `forwarding all traffic through the exit node` | Full traffic routing has been applied. |
 | entry node | `local routing restored` | Full traffic routing was rolled back; base tunnel routes remain. |
 
 Run `curl -4 https://ifconfig.me` on the entry node; with a healthy connection and `forward_all_traffic: true`, you should see the exit node network's public IPv4 address.
@@ -207,7 +206,7 @@ When changing networks, update both nodes so packets have a matching destination
 
 | Condition | What you need to check |
 |---|---|
-| Matching aliases | server `home2_lan_alias_cidr` equals client `lan_alias.alias_cidr`; both default to `10.78.0.0/16`. |
+| Matching aliases | server `exit_lan_alias_cidr` equals client `lan_alias.alias_cidr`; both default to `10.78.0.0/16`. |
 | Alias capacity | The alias network cannot be smaller than the LAN; the actual mapped range starts at the alias base and uses the LAN prefix length. |
 | Avoiding overlaps | Alias cannot overlap `tunnel_cidr`; startup also checks tunnel and alias against local interface networks, plus non-default main table routes on Linux. |
 
@@ -294,12 +293,14 @@ In `reverse-vpn-tunnel.server.jsonc`, set only what you want to change; omitted 
 | `forward_all_traffic` | `true` | `true` / `false` | Sends this machine's internet traffic through the exit node while the peer is alive. |
 | `block_ipv6` | `true` | `true` / `false` | Tries to block external IPv6 while full traffic routing is active. |
 | `tunnel_cidr` | `"10.77.0.0/30"` | Aligned IPv4 network, prefix `/0`–`/30`, without alias or local network conflicts | The tunnel network; base plus one goes to the entry node, plus two to the exit node, defaulting to `10.77.0.1` and `10.77.0.2`. |
-| `home2_lan_alias_cidr` | `"10.78.0.0/16"` | Aligned IPv4 network, `/0`–`/32`, without tunnel or local network conflicts | Routes these destination addresses to the exit node and must match its alias setting. |
+| `exit_lan_alias_cidr` | `"10.78.0.0/16"` | Aligned IPv4 network, `/0`–`/32`, without tunnel or local network conflicts | Routes these destination addresses to the exit node and must match its alias setting. |
 | `mtu` | `1280` | Integer `576`–`1500` | The packet size set when creating the TUN interface. |
 | `reconnect` | The three defaults in the next section | Object; see [retry settings](#reconnect-config) for fields | Controls when a peer is considered dead and how retries work. |
 
 `tunnel_cidr` and `api_key` must match the exit node; a valid network can still fail startup if it overlaps local routes.
 Only `forward_all_traffic` and `block_ipv6` update live; other changes need a restart.
+
+`home2_lan_alias_cidr` is deprecated; use `exit_lan_alias_cidr` instead. The old key still loads, but supplying both keys is an error.
 
 <a id="client-config"></a>
 

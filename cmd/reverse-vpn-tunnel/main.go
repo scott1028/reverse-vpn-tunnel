@@ -190,7 +190,7 @@ func runServer(ctx context.Context, cfg config.Server, watcher *config.Watcher) 
 	defer func() { closeState(state, restoreErr) }()
 	if err := checkOverlap(sys, []netsys.NamedPrefix{
 		{Name: "tunnel_cidr", Prefix: cfg.TunnelCIDR},
-		{Name: "home2_lan_alias_cidr", Prefix: cfg.Home2LANAliasCIDR},
+		{Name: cfg.ExitLANAliasKey, Prefix: cfg.ExitLANAliasCIDR},
 	}); err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func runServer(ctx context.Context, cfg config.Server, watcher *config.Watcher) 
 		return err
 	}
 	// Base routes: this host reaches 10.77.0.2 and the exit node LAN alias even with forwarding off.
-	if err := sys.AddRoute(cfg.Home2LANAliasCIDR); err != nil {
+	if err := sys.AddRoute(cfg.ExitLANAliasCIDR); err != nil {
 		return err
 	}
 	if err := tun.Configure(tunnel.Config{
@@ -264,7 +264,7 @@ func runClient(ctx context.Context, cfg config.Client) error {
 		}
 		fwd.Alias = cfg.LANAlias.AliasCIDR
 		ours = append(ours, netsys.NamedPrefix{Name: "lan_alias.alias_cidr", Prefix: fwd.Alias})
-		slog.Info("Home2 LAN alias", "lan", fwd.LAN, "alias", aliasRange)
+		slog.Info("exit node LAN alias", "lan", fwd.LAN, "alias", aliasRange)
 	}
 	if err := checkOverlap(sys, ours); err != nil {
 		return err

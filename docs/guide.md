@@ -37,7 +37,6 @@
 | mtime／stderr | mtime 是檔案最後修改時間；stderr 是程序的標準錯誤輸出，預設顯示在終端。 |
 | e2e／API | e2e 是端到端測試，這裡會測真實 Linux 網路；API 是供其他程式呼叫的介面。 |
 
-原始名稱 `home2_lan_alias_cidr`、`Home2 LAN alias`、`forwarding all traffic through Home2` 中的 `home2`／`Home2` 都指 exit node。
 
 <a id="requirements"></a>
 
@@ -123,7 +122,7 @@ sudo ./reverse-vpn-tunnel --client
 | exit node | `client started` | 轉送規則與介面已完成，接著會嘗試連線。 |
 | entry node | `peer connected` | 對端符合存活條件。 |
 | exit node | `connected to server` | 已確認 entry node 存活。 |
-| entry node | `forwarding all traffic through Home2` | 已套用全流量路由。 |
+| entry node | `forwarding all traffic through the exit node` | 已套用全流量路由。 |
 | entry node | `local routing restored` | 已撤回全流量路由；基礎隧道路由仍在。 |
 
 在 entry node 執行 `curl -4 https://ifconfig.me`，連線正常且 `forward_all_traffic: true` 時，應看到 exit node 網路的對外 IPv4。
@@ -207,7 +206,7 @@ entry node --send to 10.78.0.20--> exit node --map to 192.168.1.20--> LAN host
 
 | 條件 | 你要檢查的事 |
 |---|---|
-| alias 配對 | server `home2_lan_alias_cidr` 等於 client `lan_alias.alias_cidr`；預設都是 `10.78.0.0/16`。 |
+| alias 配對 | server `exit_lan_alias_cidr` 等於 client `lan_alias.alias_cidr`；預設都是 `10.78.0.0/16`。 |
 | alias 容量 | alias 網段不能小於 LAN；實際映射範圍從 alias 的起點開始，採 LAN 的前綴長度。 |
 | 避免衝突 | alias 不可與 `tunnel_cidr` 重疊；啟動也會檢查 tunnel／alias 和本機網段是否衝突，Linux 另查 main table 非預設路由。 |
 
@@ -294,12 +293,14 @@ macOS 若舊 utun 已消失或不再屬於本程式，會保留無法確認歸�
 | `forward_all_traffic` | `true` | `true`／`false` | 對端存活時，把本機上網流量改走 exit node。 |
 | `block_ipv6` | `true` | `true`／`false` | 啟用全流量路由時嘗試阻擋對外 IPv6。 |
 | `tunnel_cidr` | `"10.77.0.0/30"` | 對齊的 IPv4 網段，前綴 `/0`–`/30`，不可和 alias／本機網段衝突 | 隧道內使用的網段；起始位址加一給 entry node，加二給 exit node，預設為 `10.77.0.1`、`10.77.0.2`。 |
-| `home2_lan_alias_cidr` | `"10.78.0.0/16"` | 對齊的 IPv4 網段，`/0`–`/32`，不可和 tunnel／本機網段衝突 | 將這段目的位址送往 exit node，需配對它的 alias 設定。 |
+| `exit_lan_alias_cidr` | `"10.78.0.0/16"` | 對齊的 IPv4 網段，`/0`–`/32`，不可和 tunnel／本機網段衝突 | 將這段目的位址送往 exit node，需配對它的 alias 設定。 |
 | `mtu` | `1280` | 整數 `576`–`1500` | 建立 TUN 時設定的封包大小。 |
 | `reconnect` | 下節的三個預設值 | 物件，欄位見 [重連設定](#reconnect-config) | 控制多久判死與怎麼重試。 |
 
 `tunnel_cidr`、`api_key` 必須與 exit node 一致；網段合法仍可能因本機路由重疊而無法啟動。
 只有 `forward_all_traffic`、`block_ipv6` 支援即時更新，其餘重啟才生效。
+
+`home2_lan_alias_cidr` 已棄用，請改用 `exit_lan_alias_cidr`；舊鍵仍可讀取，但同時填兩個鍵會出錯。
 
 <a id="client-config"></a>
 

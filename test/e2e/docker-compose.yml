@@ -1,4 +1,4 @@
-# Home1 (public IP) <-> isp router <-> nat2 (Home2 router) <-> Home2 LAN.
+# Entry (public IP) <-> isp router <-> nat2 (Exit router) <-> Exit LAN.
 # All networks are internal; each node sets its own default route (node.sh).
 # macvlan: an internal macvlan network gets its own dummy parent, so traffic
 # between nodes skips the host bridge and its netfilter rules, which drop
@@ -23,9 +23,9 @@ services:
     command: ["/e2e/node.sh", "echo", "10.201.3.254"]
     networks:
       cloud: { ipv4_address: 10.201.3.10 }
-  home1:
+  entry:
     <<: *node
-    command: ["/e2e/node.sh", "home1", "10.201.1.254"]
+    command: ["/e2e/node.sh", "entry", "10.201.1.254"]
     networks:
       isp1: { ipv4_address: 10.201.1.10 }
   nat2:
@@ -34,9 +34,9 @@ services:
     networks:
       isp2: { ipv4_address: 10.201.2.10 }
       lan2: { ipv4_address: 192.168.77.254 }
-  home2:
+  exit:
     <<: *node
-    command: ["/e2e/node.sh", "home2", "192.168.77.254"]
+    command: ["/e2e/node.sh", "exit", "192.168.77.254"]
     networks:
       lan2: { ipv4_address: 192.168.77.10 }
   web:

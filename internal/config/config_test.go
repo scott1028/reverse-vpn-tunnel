@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -97,7 +100,7 @@ func TestLoadServer(t *testing.T) {
 		{"bad port", `{"api_key": "` + testKey + `", "listen_port": 0}`, "listen_port"},
 		{"tunnel too small", `{"api_key": "` + testKey + `", "tunnel_cidr": "10.77.0.0/31"}`, "too small"},
 		{"tunnel not masked", `{"api_key": "` + testKey + `", "tunnel_cidr": "10.77.0.1/30"}`, "IPv4 network"},
-		{"alias overlaps tunnel", `{"api_key": "` + testKey + `", "home2_lan_alias_cidr": "10.77.0.0/16"}`, "overlaps"},
+		{"alias overlaps tunnel", `{"api_key": "` + testKey + `", "exit_lan_alias_cidr": "10.77.0.0/16"}`, "overlaps"},
 		{"bad mtu", `{"api_key": "` + testKey + `", "mtu": 100}`, "mtu"},
 		{"short timeout", `{"api_key": "` + testKey + `", "reconnect": {"dead_peer_timeout_sec": 5}}`, "dead_peer_timeout_sec"},
 		{"negative retries", `{"api_key": "` + testKey + `", "reconnect": {"max_retries": -1}}`, "max_retries"},
@@ -132,8 +135,8 @@ func TestLoadClient(t *testing.T) {
 		wantErr string
 	}{
 		{"lan cidr", `{"api_key": "` + testKey + `", "server_address": "1.2.3.4:51820", "lan_alias": {"lan_cidr": "192.168.1.0/24"}}`, ""},
-		{"no port", `{"api_key": "` + testKey + `", "server_address": "home1.example.com"}`, "host:port"},
-		{"bad port", `{"api_key": "` + testKey + `", "server_address": "home1.example.com:0"}`, "port must be"},
+		{"no port", `{"api_key": "` + testKey + `", "server_address": "entry.example.com"}`, "host:port"},
+		{"bad port", `{"api_key": "` + testKey + `", "server_address": "entry.example.com:0"}`, "port must be"},
 		{"bad lan cidr", `{"api_key": "` + testKey + `", "lan_alias": {"lan_cidr": "lan"}}`, "lan_cidr"},
 		{"alias disabled skips alias checks", `{"api_key": "` + testKey + `", "lan_alias": {"enabled": false, "lan_cidr": "lan"}}`, ""},
 	}
@@ -192,5 +195,83 @@ func TestLoadErrorsDoNotLeakContent(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestExitAliasConfig(t *testing.T) {
+	for _, test := range []struct {
+		name, fields, wantAlias, wantError string
+		wantWarning                        bool
+	}{
+		{"default", "", "10.78.0.0/16", "", false},
+		{"new key", `,"exit_lan_alias_cidr":"10.79.0.0/16"`, "10.79.0.0/16", "", false},
+		{"legacy key", `,"home2_lan_alias_cidr":"10.79.0.0/16"`, "10.79.0.0/16", "", true},
+		{"both keys", `,"exit_lan_alias_cidr":"10.78.0.0/16","home2_lan_alias_cidr":"10.79.0.0/16"`, "", "both", false},
+		{"both null", `,"exit_lan_alias_cidr":null,"home2_lan_alias_cidr":null`, "", "both", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			path := filepath.Join(t.TempDir(), ServerFile)
+			if err := os.WriteFile(path, []byte(`{"api_key":"`+testKey+`"`+test.fields+`}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadServer(path)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) || !strings.Contains(err.Error(), "exit_lan_alias_cidr") || !strings.Contains(err.Error(), "home2_lan_alias_cidr") {
+					t.Fatalf("want both-key error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(cfg)
+			if err != nil || !bytes.Contains(encoded, []byte(`"exit_lan_alias_cidr":"`+test.wantAlias+`"`)) {
+				t.Fatalf("alias not loaded under new key: %s, %v", encoded, err)
+			}
+			warning := "home2_lan_alias_cidr is deprecated; rename it to exit_lan_alias_cidr"
+			aliasKey := "exit_lan_alias_cidr"
+			if test.wantWarning {
+				aliasKey = "home2_lan_alias_cidr"
+			}
+			if cfg.ExitLANAliasKey != aliasKey || bytes.Contains(encoded, []byte("ExitLANAliasKey")) {
+				t.Fatalf("configured key metadata = %q; encoded config: %s", cfg.ExitLANAliasKey, encoded)
+			}
+			wantCount := 0
+			if test.wantWarning {
+				wantCount = 1
+			}
+			if count := strings.Count(logs.String(), warning); count != wantCount {
+				t.Fatalf("warning count %d, want %d: %s", count, wantCount, logs.String())
+			}
+		})
+	}
+}
+
+func TestAliasErrorsNameConfiguredKey(t *testing.T) {
+	for _, key := range []string{"exit_lan_alias_cidr", "home2_lan_alias_cidr"} {
+		for _, alias := range []string{"not-a-cidr", "2001:db8::/64", "10.77.0.0/16"} {
+			t.Run(key+"/"+alias, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), ServerFile)
+				if err := os.WriteFile(path, []byte(`{"api_key":"`+testKey+`","`+key+`":"`+alias+`"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				_, err := LoadServer(path)
+				if err == nil {
+					t.Fatal("invalid alias was accepted")
+				}
+				message := strings.TrimPrefix(err.Error(), path+": ")
+				otherKey := "home2_lan_alias_cidr"
+				if key == otherKey {
+					otherKey = "exit_lan_alias_cidr"
+				}
+				if !strings.Contains(message, key) || strings.Contains(message, otherKey) {
+					t.Fatalf("want only configured key %s in error, got %v", key, err)
+				}
+			})
+		}
 	}
 }

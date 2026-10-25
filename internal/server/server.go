@@ -158,7 +158,7 @@ func (s *Server) reconcile() {
 			return
 		}
 		s.isApplied, s.isV6Blocked = true, s.cfg.BlockIPv6
-		slog.Info("forwarding all traffic through Home2")
+		slog.Info("forwarding all traffic through the exit node")
 	case !isDesired && s.isDirty:
 		// A failed rollback stays dirty and is retried on the next tick.
 		if s.rollback() == nil {
@@ -198,6 +198,7 @@ func (s *Server) reloadConfig() {
 	}
 	hot := s.cfg
 	hot.ForwardAllTraffic, hot.BlockIPv6 = cfg.ForwardAllTraffic, cfg.BlockIPv6
+	hot.ExitLANAliasKey = cfg.ExitLANAliasKey
 	if hot != cfg {
 		slog.Warn("config changes other than forward_all_traffic / block_ipv6 need a restart")
 	}

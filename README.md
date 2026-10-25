@@ -47,10 +47,9 @@ entry node 的 log 會出現以下訊息；時間、等級與附加欄位依執�
 ```text
 server listening
 peer connected
-forwarding all traffic through Home2
+forwarding all traffic through the exit node
 ```
 
-這個原始訊息中的 `Home2` 指 exit node；讀不到預期位址時，先看[重連與恢復本地路由](docs/guide.md#reconnect)。
 
 ## 哪台跑哪個參數
 

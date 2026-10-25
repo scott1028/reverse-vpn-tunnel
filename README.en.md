@@ -47,10 +47,9 @@ The entry node logs these messages; timestamps, levels, and extra fields depend 
 ```text
 server listening
 peer connected
-forwarding all traffic through Home2
+forwarding all traffic through the exit node
 ```
 
-`Home2` in that original message means the exit node; if the address differs, check [retries and restoring local routing](docs/guide.en.md#reconnect).
 
 ## Which machine runs which flag
 

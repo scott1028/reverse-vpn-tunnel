@@ -19,8 +19,8 @@ echo)
   chmod +x /www/cgi-bin/ip
   busybox httpd -p 0.0.0.0:80 -h /www
   ;;
-home1)
-  # Same network as Home2 LAN, to force the alias path.
+entry)
+  # Same network as Exit LAN, to force the alias path.
   ip link add lan-dup type dummy
   ip addr add 192.168.77.1/24 dev lan-dup
   ip link set lan-dup up
@@ -42,7 +42,7 @@ nat2)
   sysctl -qw net.ipv4.ip_forward=1
   iptables -t nat -A POSTROUTING -s 192.168.77.0/24 -o "$(iface_of 10.201.2.10)" -j MASQUERADE
   ;;
-home2)
+exit)
   # Like a Docker host: forwarding on, FORWARD policy DROP, rules of others.
   sysctl -qw net.ipv4.ip_forward=1
   iptables -P FORWARD DROP

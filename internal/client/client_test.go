@@ -55,12 +55,12 @@ type harness struct {
 func newHarness(t *testing.T, maxRetries int) *harness {
 	t.Helper()
 	cfg := config.DefaultClient()
-	cfg.ServerAddress = "home1.example.com:51820"
+	cfg.ServerAddress = "entry.example.com:51820"
 	cfg.Reconnect = config.Reconnect{DeadPeerTimeoutSec: 20, RetryIntervalSec: 10, MaxRetries: maxRetries}
 	h := &harness{t0: time.Unix(1_700_000_000, 0), tun: &fakeTunnel{}, sys: &fakeSystem{dev: "eth0"}}
 	h.ips = []netip.Addr{netip.MustParseAddr("203.0.113.7")}
 	resolve := func(host string) (netip.Addr, error) {
-		if host != "home1.example.com" {
+		if host != "entry.example.com" {
 			t.Fatalf("resolved %q", host)
 		}
 		ip := h.ips[0]

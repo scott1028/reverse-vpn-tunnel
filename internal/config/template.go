@@ -23,7 +23,7 @@ const serverTemplate = `{
   "block_ipv6": true,
   // Must match the client config.
   "tunnel_cidr": "10.77.0.0/30",
-  "home2_lan_alias_cidr": "10.78.0.0/16",
+  "exit_lan_alias_cidr": "10.78.0.0/16",
   "mtu": 1280,
   "reconnect": {
     "dead_peer_timeout_sec": 45,
