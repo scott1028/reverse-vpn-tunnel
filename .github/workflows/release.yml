@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to release again
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.revision.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify tag and record commit
+        id: revision
+        run: |
+          [[ "$RELEASE_TAG" == v* && "$RELEASE_TAG" != */* ]]
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - run: go vet ./...
+      - run: go test ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test.outputs.commit }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build archives and checksums
+        run: |
+          short_hash=$(git rev-parse HEAD | cut -c1-7)
+          release_dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$release_dir"
+          for target in linux/amd64 darwin/arm64; do
+            target_os=${target%/*}
+            target_arch=${target#*/}
+            binary_dir="$RUNNER_TEMP/bin/$target"
+            mkdir -p "$binary_dir"
+            CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" go build -trimpath -ldflags="-s -w" \
+              -o "$binary_dir/reverse-vpn-tunnel" ./cmd/reverse-vpn-tunnel
+            tar -C "$binary_dir" -czf "$release_dir/reverse-vpn-tunnel_${RELEASE_TAG}_${short_hash}_${target_os}_${target_arch}.tar.gz" reverse-vpn-tunnel
+          done
+          cd "$release_dir"
+          sha256sum *.tar.gz > "reverse-vpn-tunnel_${RELEASE_TAG}_${short_hash}_checksums.txt"
+      - name: Replace release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_dir="$RUNNER_TEMP/release-assets"
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | [.id, .tag_name] | @tsv')
+          while IFS=$'\t' read -r release_id release_tag; do
+            if [[ "$release_tag" == "$RELEASE_TAG" ]]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+            fi
+          done <<< "$releases"
+          gh release create "$RELEASE_TAG" "$release_dir"/* \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes
