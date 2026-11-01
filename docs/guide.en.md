@@ -44,6 +44,7 @@ Use this table to read configs, commands, and logs without first learning the VP
 | tag / release / asset / draft | A tag marks a Git commit; a release is a GitHub version page, an asset is a download, and a draft is an unpublished release. |
 | checksum / SHA-256 | A checksum checks a file; here SHA-256 hashes let you compare downloaded content for equality. |
 | e2e / API | e2e means end-to-end testing, here using real Linux networking; an API is an interface other programs can call. |
+| smoke test / network namespace / veth | A smoke test is a quick test of only the key path; a network namespace is a separate, independent network setup on the same machine; veth is a pair of linked virtual interfaces, where a packet sent into one end comes out of the other. |
 
 <a id="requirements"></a>
 
@@ -420,6 +421,8 @@ Use the Makefile to build for your current host platform; release and debug bina
 | `make release` | `dist/reverse-vpn-tunnel`; `CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`, removing symbols and debug information. |
 | `make debug` | `dist/reverse-vpn-tunnel-debug`; `CGO_ENABLED=0`, `-gcflags="all=-N -l"`, disabling optimization and inlining while keeping debug information. |
 | `make test` | `go test ./...`; without a cache hit, the idle test takes about 80 seconds. |
+| `make e2e-test` | The two-container Docker smoke test; prints SKIP and exits 0 when Docker is not usable. See [Test real Linux networking behavior](#e2e). |
+| `make e2e-full` | The six-container full Docker e2e test, taking several minutes; also skipped when Docker is not usable. |
 | `make clean` | Removes only those two binaries, keeping the `dist/` directory and its config files. |
 | `go vet ./...` | Checks for common Go mistakes without starting a tunnel. |
 
@@ -498,23 +501,68 @@ grep '_darwin_arm64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | shasum -a 25
 ## Test real Linux networking behavior
 
 Use Docker e2e to check routing, forwarding, and cleanup inside containers, keeping tunnel setup changes off the host.
+There are two tests, like starting a car and driving it around the lot versus a full inspection at the shop: the smoke test checks only the key forwarding path, and the full test checks everything.
+
+| Command | Containers | Time | What it proves |
+|---|---|---|---|
+| `make e2e-test` | 2 (entry, exit) | about 8 seconds measured, once the image is built | entry's default traffic enters the tunnel, and exit forwards it out with NAT |
+| `make e2e-full` | 6 | several minutes | exit addresses, alias, idle / probes, live updates, repair, fail-open, and stop cleanup |
 
 ```text
-build binary --build image--> start six containers --run checks--> save logs --finish--> remove containers
+build binary --build image--> start containers --run checks--> save logs --finish--> remove containers
 ```
 
-It needs a Linux host, Go, Bash, Docker daemon access, and Docker Compose, plus privileged containers, TUN, and macvlan network support.
-The first build needs access to `ubuntu:24.04` and apt packages; the test includes a 124-second idle wait and other waits, usually taking several minutes, longer with first-time downloads.
-Its exit trap writes logs to `.tmp/e2e/server.log` and `.tmp/e2e/client.log`; the binary is `.tmp/e2e/bin/reverse-vpn-tunnel`.
+Both tests follow the flow above and share the image `rvt-e2e:latest`.
+They need a Linux host, Go, Bash, Docker daemon access, and Docker Compose, plus privileged containers, TUN, and macvlan network support.
+The first build needs access to `ubuntu:24.04` and apt packages, so first-time downloads take longer.
+Run the commands from the repository root; the host command needs no sudo, but your user must be able to use Docker.
 
-### Run the test
+### When Docker is missing
 
-Run this from the repository root; the host command needs no sudo, but your user must be able to use Docker.
+The make targets first run `test/e2e/docker-ready.sh`, which checks the `docker` command, daemon access (including permission), and the `docker compose` plugin, in that order.
+If any of them is unusable, it prints `SKIP: <reason>, e2e test not run` and exits 0 without running the test; when you see exit 0, check that the output is not a SKIP.
+Running `bash test/e2e/smoke/run.sh` or `bash test/e2e/run.sh` directly skips this check, so a missing Docker fails right away.
+
+### What is left after a run
+
+When either script ends, its exit trap removes the containers, networks, and volumes of its Compose project; the image stays for the next run.
+This also happens when the test fails or you press `Ctrl-C`.
+
+A few special cases:
+- Sending SIGTERM to the script process only (for example `kill <pid>`): cleanup waits for the current child process to finish, up to the 124-second idle wait in the full test.
+- Stopping it with SIGKILL (for example `kill -9`): no cleanup runs; the next run removes leftovers of the same project before it starts.
+- Logs and binaries stay under `.tmp/`; the next two sections list the paths.
+
+### Run the smoke test
+
+The smoke test uses two containers to prove one thing: once entry hands its default traffic to the tunnel, exit really forwards it.
+
+```text
+entry 10.202.0.10 --tunnel--> exit 10.202.0.20 --forward + NAT--> echo 198.51.100.1
+entry             <--tunnel-- exit             <--reply---------- echo (sees 198.51.100.254)
+```
+
+The echo service runs in a network namespace inside the exit container, so entry can reach it only through exit.
+echo sees the source `198.51.100.254`, exit's end of the veth; that address means exit applied NAT and the reply came back through the tunnel.
 
 ```sh
-bash test/e2e/run.sh
+make e2e-test
 ```
 
+It checks, in order: before the tunnel, exit reaches echo itself and entry cannot; after the tunnel is up, entry's route to `198.51.100.1` uses `rvt0`; finally, entry reaches echo and sees `198.51.100.254`.
+The test uses Compose project `rvt-e2e-smoke` and internal network `10.202.0.0/24`; logs are `.tmp/e2e-smoke/server.log` and `.tmp/e2e-smoke/client.log`, and the binary is `.tmp/e2e-smoke/bin/reverse-vpn-tunnel`.
+It does not test a client behind NAT, alias access, or system restore after stopping; the full test covers those.
+
+### Run the full test
+
+The full test uses 6 containers to model a real topology: entry has a public address, exit sits on a LAN behind a NAT router, and an outside echo host answers.
+
+```sh
+make e2e-full
+```
+
+The test includes a 124-second idle wait and other waits, usually taking several minutes.
+Its exit trap writes logs to `.tmp/e2e/server.log` and `.tmp/e2e/client.log`; the binary is `.tmp/e2e/bin/reverse-vpn-tunnel`.
 The test uses Compose project `rvt-e2e` and removes its containers and volumes before and after the run; do not run another test with that project name at the same time.
 It checks exit addresses, alias access with overlapping LANs, idle and probes, live updates through two save methods, missing-jump repair, clean-stop goodbye and restoration within 6 seconds under default-deny INPUT, restoration within 38 seconds of link loss with ongoing traffic, and SIGTERM / SIGHUP cleanup.
 It does not test macOS; internal networks use `10.201.1.0/24`, `10.201.2.0/24`, `10.201.3.0/24`, and `192.168.77.0/24`, so avoid conflicts with existing Docker networks.

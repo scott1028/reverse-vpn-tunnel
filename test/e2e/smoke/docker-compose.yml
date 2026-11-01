@@ -1,0 +1,25 @@
+# Two-node smoke test: Entry (server) and Exit (client) on one internal network.
+# run.sh sets routes and the echo target inside Exit after start.
+# macvlan: internal traffic skips the host bridge and its netfilter rules.
+x-node: &node
+  image: rvt-e2e:latest
+  privileged: true # /dev/net/tun, netns and writable /proc/sys
+  command: ["sleep", "infinity"]
+  volumes:
+    - ${RVT_BIN_DIR:?}:/opt/rvt:ro
+
+services:
+  entry:
+    <<: *node
+    networks:
+      wan: { ipv4_address: 10.202.0.10 }
+  exit:
+    <<: *node
+    networks:
+      wan: { ipv4_address: 10.202.0.20 }
+
+networks:
+  wan:
+    driver: macvlan
+    internal: true
+    ipam: { config: [{ subnet: 10.202.0.0/24 }] }

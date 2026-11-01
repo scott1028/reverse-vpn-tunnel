@@ -44,6 +44,7 @@
 | tag／release／asset／draft | tag 標記 Git commit；release 是 GitHub 的版本頁，asset 是下載檔，draft 是尚未公開的 release。 |
 | checksum／SHA-256 | checksum 是檔案的檢查碼，這裡用 SHA-256 雜湊比對下載內容是否一致。 |
 | e2e／API | e2e 是端到端測試，這裡會測真實 Linux 網路；API 是供其他程式呼叫的介面。 |
+| smoke test／network namespace／veth | smoke test 是只驗最關鍵路徑的快速測試；network namespace 是同一台機器裡另一套獨立的網路設定；veth 是一對相連的虛擬網路介面，從一端送進的封包會從另一端出來。 |
 
 <a id="requirements"></a>
 
@@ -420,6 +421,8 @@ Linux 還原 `net.ipv4.ip_forward=0` 時會提醒：若 Docker 在 exit node 執
 | `make release` | `dist/reverse-vpn-tunnel`；`CGO_ENABLED=0`、`-trimpath`、`-ldflags="-s -w"`，移除符號與除錯資訊。 |
 | `make debug` | `dist/reverse-vpn-tunnel-debug`；`CGO_ENABLED=0`、`-gcflags="all=-N -l"`，停用最佳化與內聯，保留除錯資訊。 |
 | `make test` | `go test ./...`；未命中快取時，idle 測試約需 80 秒。 |
+| `make e2e-test` | 2 個容器的 Docker smoke test；沒有可用的 Docker 時印出 SKIP 並以 0 結束，見[怎麼驗證真實 Linux 網路行為](#e2e)。 |
+| `make e2e-full` | 6 個容器的完整 Docker e2e，要數分鐘；沒有可用的 Docker 時同樣略過。 |
 | `make clean` | 只刪上述兩個 binary，保留 `dist/` 目錄與其中的設定檔。 |
 | `go vet ./...` | 檢查 Go 程式的常見問題，不啟動隧道。 |
 
@@ -498,23 +501,68 @@ grep '_darwin_arm64\.tar\.gz$' reverse-vpn-tunnel_*_checksums.txt | shasum -a 25
 ## 怎麼驗證真實 Linux 網路行為
 
 你用 Docker e2e 在容器裡驗證路由、轉送與清理，避免直接修改主機的隧道設定。
+這裡有兩種測試，差別像交車前發動繞一圈，和送廠做完整檢驗：smoke test 只確認最關鍵的轉送路徑，full test 才逐項檢查。
+
+| 指令 | 容器數 | 時間 | 它證明什麼 |
+|---|---|---|---|
+| `make e2e-test` | 2（entry、exit） | image 已建好時，實測約 8 秒 | entry 的 default 流量進入隧道，由 exit 轉送並 NAT 出去 |
+| `make e2e-full` | 6 | 數分鐘 | 出口位址、alias、idle／probe、即時更新、修復、fail-open 與停止清理 |
 
 ```text
-build binary --build image--> start six containers --run checks--> save logs --finish--> remove containers
+build binary --build image--> start containers --run checks--> save logs --finish--> remove containers
 ```
 
-它需要 Linux 主機、Go、Bash、可操作的 Docker daemon 與 Docker Compose，還需要 privileged 容器、TUN 和 macvlan 網路支援。
-第一次建置要能取得 `ubuntu:24.04` 與 apt 套件；測試包含 124 秒 idle 等待與其他等待，通常要數分鐘，首次下載會更久。
-退出 trap 將 log 寫到 `.tmp/e2e/server.log`、`.tmp/e2e/client.log`，binary 放在 `.tmp/e2e/bin/reverse-vpn-tunnel`。
+兩種測試都照上面的流程走，共用 image `rvt-e2e:latest`。
+它們需要 Linux 主機、Go、Bash、可操作的 Docker daemon 與 Docker Compose，還需要 privileged 容器、TUN 和 macvlan 網路支援。
+第一次建置要能取得 `ubuntu:24.04` 與 apt 套件，首次下載會比較久。
+你在 repository 根目錄執行命令，主機不必用 sudo，但你的使用者必須能操作 Docker。
 
-### 你要怎麼執行測試
+### 沒有 Docker 時會怎樣
 
-你在 repository 根目錄執行下列命令，主機不必用 sudo，但你的使用者必須能操作 Docker。
+make target 會先用 `test/e2e/docker-ready.sh` 依序檢查 `docker` 指令、daemon 連線（含權限）與 `docker compose` plugin。
+任一項不可用，它會印出 `SKIP: <原因>, e2e test not run`，不跑測試並以 0 結束；看到 exit 0 時，先確認輸出不是 SKIP。
+直接執行 `bash test/e2e/smoke/run.sh` 或 `bash test/e2e/run.sh` 不做這項檢查，缺 Docker 會直接失敗。
+
+### 跑完後會留下什麼
+
+兩個 script 結束時，退出 trap 會移除自己 Compose project 的容器、網路與 volumes；image 留著給下次用。
+測試失敗或你按 `Ctrl-C` 時也一樣會清理。
+
+幾種特殊情況：
+- 只對 script 的程序送 SIGTERM（例如 `kill <pid>`）：清理會等目前的子程序結束，full test 最久要等 124 秒的 idle 等待。
+- 用 SIGKILL（例如 `kill -9`）強制停止：來不及清理；下次執行開始前，script 會先移除同名 project 的殘留。
+- log 與 binary 留在 `.tmp/` 底下，路徑寫在下面兩節。
+
+### 你要怎麼跑 smoke test
+
+smoke test 用兩個容器確認一件事：entry 把 default 流量交給隧道後，exit 真的幫它轉送出去。
+
+```text
+entry 10.202.0.10 --tunnel--> exit 10.202.0.20 --forward + NAT--> echo 198.51.100.1
+entry             <--tunnel-- exit             <--reply---------- echo (sees 198.51.100.254)
+```
+
+echo 服務跑在 exit 容器裡的 network namespace，entry 只能經過 exit 才連得到。
+echo 看到的來源是 `198.51.100.254`，也就是 exit 那端的 veth；看到這個位址，代表 exit 做了 NAT，回應也經隧道回到 entry。
 
 ```sh
-bash test/e2e/run.sh
+make e2e-test
 ```
 
+它依序檢查：隧道建立前 exit 自己連得到 echo、entry 連不到；隧道建立後 entry 到 `198.51.100.1` 的路由走 `rvt0`；最後 entry 連到 echo 並看到 `198.51.100.254`。
+測試使用 Compose project `rvt-e2e-smoke` 與內部網路 `10.202.0.0/24`；log 在 `.tmp/e2e-smoke/server.log`、`.tmp/e2e-smoke/client.log`，binary 在 `.tmp/e2e-smoke/bin/reverse-vpn-tunnel`。
+它不測 NAT 後方的 client、alias 與停止後的系統還原，這些交給 full test。
+
+### 你要怎麼跑完整測試
+
+full test 用 6 個容器模擬真實拓樸：entry 有對外位址，exit 在 NAT 路由器後方的 LAN，另有外部 echo 主機。
+
+```sh
+make e2e-full
+```
+
+測試包含 124 秒 idle 等待與其他等待，通常要數分鐘。
+退出 trap 將 log 寫到 `.tmp/e2e/server.log`、`.tmp/e2e/client.log`，binary 放在 `.tmp/e2e/bin/reverse-vpn-tunnel`。
 測試使用 Compose project `rvt-e2e`，執行前後會移除該 project 的容器與 volumes；不要和另一份同名測試同時跑。
 它檢查出口位址、重複內網的 alias、idle／probe、兩種存檔方式的即時更新、遺失 jump 的修復、預設拒絕 INPUT 下的正常停止 goodbye 與 6 秒內恢復、持續送流量斷線後 38 秒內恢復，以及 SIGTERM／SIGHUP 清理。
 它不測 macOS；內部網路使用 `10.201.1.0/24`、`10.201.2.0/24`、`10.201.3.0/24`、`192.168.77.0/24`，請避免和現有 Docker 網路衝突。
